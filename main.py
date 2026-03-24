@@ -13,16 +13,16 @@ from telethon import TelegramClient, errors
 # ==================== КОНФИГУРАЦИЯ ====================
 CONFIG_FILE = "forwarder_config.json"
 DEFAULT_CONFIG = {
-    "api_id": "",
-    "api_hash": "",
+    "api_id": "34531129",
+    "api_hash": "afcccc31d4a493b7035809b5dfc09386",
     "recipients_file": "recipients.txt",
     "groups_file": "groups.txt",
     # Настройки для кружков (личные сообщения)
-    "note_source_chat": "https://t.me/",
+    "note_source_chat": "https://t.me/arteeeeimKokaraev",
     "note_auto_find": True,
     "note_message_ids": "4,3",
     # Настройки для видео (личные сообщения)
-    "video_source_chat": "me",
+    "video_source_chat": "https://t.me/arteeeeimKokaraev",
     "video_auto_find": True,
     "video_message_ids": "5,6", # 5 - подкаст, 6 - эксперт
     "video_interval": 150,              # секунд между кружком и видео
@@ -31,7 +31,11 @@ DEFAULT_CONFIG = {
     "group_cycle_interval": 1800,       # сек для групп
     "group_message_text": "Я вообще андрей",
     "tz_offset": 3,                     # по умолчанию Москва
-    "log_file": "forwarder.log"
+    "log_file": "forwarder.log",
+    # Настройки для групп (пересылка сообщений)
+    "group_source_chat": "https://t.me/programmmmmmer",           # чат-источник
+    "group_auto_find": True,             # авто-поиск последнего
+    "group_message_ids": "4",             # ID сообщений через запяту
 }
 
 logger = logging.getLogger("forwarder")
@@ -78,9 +82,12 @@ class ForwarderApp(ctk.CTk):
     # ---------- Загрузка / сохранение конфига ----------
     def load_config(self):
         if Path(CONFIG_FILE).exists():
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                saved = json.load(f)
-                return {**DEFAULT_CONFIG, **saved}
+            try:
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    saved = json.load(f)
+                    return {**DEFAULT_CONFIG, **saved}
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                print("Ошибка чтения конфига. Использую значения по умолчанию.")
         return DEFAULT_CONFIG.copy()
 
     def save_config(self):
@@ -98,7 +105,10 @@ class ForwarderApp(ctk.CTk):
             "video_interval": int(self.video_interval_entry.get()),
             "delay_between_sends": int(self.delay_entry.get()),
             "group_cycle_interval": int(self.group_interval_entry.get()),
-            "group_message_text": self.group_text_entry.get(),
+            # "group_message_text": self.group_text_entry.get(),  <-- УДАЛИТЬ ЭТУ СТРОКУ
+            "group_source_chat": self.group_chat_entry.get(),
+            "group_auto_find": self.group_auto_var.get(),
+            "group_message_ids": self.group_ids_entry.get(),
             "tz_offset": int(self.tz_entry.get()),
             "log_file": self.log_file_entry.get(),
         })
@@ -228,16 +238,31 @@ class ForwarderApp(ctk.CTk):
 
     # ---------- Вкладка групп ----------
     def create_groups_tab(self):
-        ctk.CTkLabel(self.tab_groups, text="Текст сообщения:").grid(row=0, column=0, padx=10, pady=5, sticky="w")
-        self.group_text_entry = ctk.CTkEntry(self.tab_groups, width=400)
-        self.group_text_entry.grid(row=0, column=1, padx=10, pady=5)
-        self.group_text_entry.insert(0, self.config.get("group_message_text", "Я вообще андрей"))
+        # Блок "Источник сообщения для пересылки"
+        self.source_frame = ctk.CTkFrame(self.tab_groups)
+        self.source_frame.grid(row=0, column=0, columnspan=2, padx=10, pady=5, sticky="ew")
+        
+        ctk.CTkLabel(self.source_frame, text="Чат-источник:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.group_chat_entry = ctk.CTkEntry(self.source_frame, width=250)
+        self.group_chat_entry.grid(row=0, column=1, padx=5, pady=5)
+        self.group_chat_entry.insert(0, self.config.get("group_source_chat", "me"))
+        
+        self.group_auto_var = ctk.BooleanVar(value=self.config.get("group_auto_find", True))
+        self.group_auto_check = ctk.CTkCheckBox(self.source_frame, text="авто-поиск последнего", variable=self.group_auto_var)
+        self.group_auto_check.grid(row=0, column=2, padx=5, pady=5)
+        
+        ctk.CTkLabel(self.source_frame, text="ID сообщений (через запятую):").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        self.group_ids_entry = ctk.CTkEntry(self.source_frame, width=400)
+        self.group_ids_entry.grid(row=1, column=1, columnspan=2, padx=5, pady=5, sticky="w")
+        self.group_ids_entry.insert(0, self.config.get("group_message_ids", ""))
 
+        # Блок "Интервал между циклами"
         ctk.CTkLabel(self.tab_groups, text="Интервал между циклами (сек):").grid(row=1, column=0, padx=10, pady=5, sticky="w")
         self.group_interval_entry = ctk.CTkEntry(self.tab_groups, width=100)
         self.group_interval_entry.grid(row=1, column=1, padx=10, pady=5, sticky="w")
         self.group_interval_entry.insert(0, str(self.config.get("group_cycle_interval", 720)))
 
+        # Редактор списка групп
         ctk.CTkLabel(self.tab_groups, text="Редактировать список групп:").grid(row=2, column=0, padx=10, pady=5, sticky="w")
         self.groups_text = ctk.CTkTextbox(self.tab_groups, height=200, wrap="none")
         self.groups_text.grid(row=3, column=0, columnspan=2, padx=10, pady=5, sticky="nsew")
@@ -530,31 +555,64 @@ class ForwarderApp(ctk.CTk):
 
     # ---------- Режим групп ----------
     async def run_groups_mode(self, api_id, api_hash, tz_offset):
+        """
+        Режим групп: бесконечно пересылает случайное сообщение из указанного чата
+        во все группы через заданный интервал.
+        """
+        # Загружаем список групп
         groups_file = self.groups_file_entry.get()
         groups = self.load_groups(groups_file)
         if not groups:
             self.log("Нет групп для рассылки.")
             return
 
-        text = self.group_text_entry.get()
-        if not text:
-            self.log("Текст сообщения не может быть пустым.")
+        # Интервал между циклами
+        cycle_interval = int(self.group_interval_entry.get())
+        if cycle_interval <= 0:
+            self.log("Интервал между циклами должен быть больше 0.")
             return
 
-        interval = int(self.group_interval_entry.get())
-
+        # Создаём клиент
         self.client = TelegramClient('user_session', api_id, api_hash)
         try:
             await self.client.start()
             self.log("Авторизация успешна.")
-            await self.infinite_scheduled_group_mailing(self.client, groups, text, interval, tz_offset)
+
+            # Получаем сообщения-источники из указанного чата
+            source_chat = self.group_chat_entry.get()
+            auto_find = self.group_auto_var.get()
+            ids_str = self.group_ids_entry.get()
+
+            source_messages = await self.get_source_messages(
+                self.client,
+                source_chat,
+                auto_find,
+                ids_str
+            )
+
+            if not source_messages:
+                self.log(f"Не удалось получить ни одного сообщения из чата {source_chat}. Отмена.")
+                return
+
+            self.log(f"Загружено {len(source_messages)} сообщений-источников (ID: {', '.join(str(m.id) for m in source_messages)}).")
+
+            # Запускаем бесконечную рассылку с пересылкой
+            await self.infinite_scheduled_group_mailing(
+                self.client,
+                groups,
+                source_messages,
+                cycle_interval,
+                tz_offset
+            )
+
         except errors.rpcerrorlist.ApiIdInvalidError:
             self.log("Неверный API_ID или API_HASH.")
         except Exception as e:
             self.log(f"Ошибка в режиме групп: {e}")
         finally:
-            await self.client.disconnect()
-            self.client = None
+            if self.client:
+                await self.client.disconnect()
+                self.client = None
             self.log("Сессия закрыта.")
 
     def load_groups(self, file_path):
@@ -564,16 +622,19 @@ class ForwarderApp(ctk.CTk):
         with open(file_path, 'r', encoding='utf-8') as f:
             return [line.strip() for line in f if line.strip()]
 
-    async def infinite_scheduled_group_mailing(self, client, groups, text, cycle_interval, tz_offset):
+    async def infinite_scheduled_group_mailing(self, client, groups, source_messages, cycle_interval, tz_offset):
         cycle_num = 1
         schedule_delta = timedelta(seconds=cycle_interval)
 
         while self.running:
             self.log(f"=== Цикл {cycle_num} ===")
+            # Выбираем случайное сообщение для этого цикла
+            source_msg = random.choice(source_messages)
+            self.log(f"Выбрано сообщение ID={source_msg.id} из чата {source_msg.chat_id}")
             for group in groups:
                 if not self.running:
                     break
-                await self.send_scheduled_message(client, group, text, schedule_delta, tz_offset)
+                await self.forward_scheduled_message(client, group, source_msg, schedule_delta, tz_offset)
                 await asyncio.sleep(1)
 
             if not self.running:
@@ -589,6 +650,28 @@ class ForwarderApp(ctk.CTk):
             if not self.running:
                 break
             cycle_num += 1
+
+    async def forward_scheduled_message(self, client, group, source_msg, schedule_delta, tz_offset):
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                entity = await client.get_entity(group)
+                schedule_time_utc = datetime.utcnow() + schedule_delta
+                await client.forward_messages(
+                    entity,
+                    source_msg,
+                    drop_author=True,
+                    schedule=schedule_time_utc
+                )
+                display_time = schedule_time_utc + timedelta(hours=tz_offset)
+                self.log(f"Сообщение ID={source_msg.id} запланировано в группу {group} на {display_time.strftime('%H:%M:%S')}")
+                break
+            except errors.FloodWaitError as e:
+                self.log(f"Flood wait для {group}: ждём {e.seconds} сек (попытка {attempt+1})")
+                await asyncio.sleep(e.seconds)
+            except Exception as e:
+                self.log(f"Ошибка при планировании в группу {group}: {e}")
+                break
 
     async def send_scheduled_message(self, client, group, text, schedule_delta, tz_offset):
         max_retries = 5
