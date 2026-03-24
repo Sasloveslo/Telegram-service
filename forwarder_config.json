@@ -1,0 +1,18 @@
+{
+    "api_id": "",
+    "api_hash": "",
+    "recipients_file": "recipients.txt",
+    "groups_file": "groups.txt",
+    "note_source_chat": "https://t.me/",
+    "note_auto_find": false,
+    "note_message_ids": "4,3",
+    "video_source_chat": "https://t.me/",
+    "video_auto_find": false,
+    "video_message_ids": "6",
+    "video_interval": 150,
+    "delay_between_sends": 360,
+    "group_cycle_interval": 1800,
+    "group_message_text": "Я вообще андрей",
+    "tz_offset": 3,
+    "log_file": "forwarder.log"
+}
