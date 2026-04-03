@@ -1,8 +1,8 @@
 from telethon import TelegramClient
 from telethon.tl.types import DocumentAttributeVideo, DocumentAttributeAudio
 
-api_id = 34531129
-api_hash = 'afcccc31d4a493b7035809b5dfc09386'
+api_id = 34531129 # 34531129 - LKS 
+api_hash = 'afcccc31d4a493b7035809b5dfc09386' # afcccc31d4a493b7035809b5dfc09386 - LKS
 chat_input = 'https://t.me/arteeeeimKokaraev'  # укажите ваш канал
 limit = 50
 

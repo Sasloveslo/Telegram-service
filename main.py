@@ -14,6 +14,7 @@ from pathlib import Path
 import customtkinter as ctk
 from tkinter import filedialog
 from telethon import TelegramClient, errors
+from telethon.tl.types import DocumentAttributeVideo, DocumentAttributeAudio
 
 # ==================== КОНФИГУРАЦИЯ ====================
 CONFIG_FILE = "forwarder_config.json"
@@ -25,11 +26,11 @@ DEFAULT_CONFIG = {
     # Настройки для кружков (личные сообщения)
     "note_source_chat": "https://t.me/arteeeeimKokaraev",
     "note_auto_find": True,
-    "note_message_ids": "4,3",
+    "note_message_ids": "4,3", # 18 - энергия 
     # Настройки для видео (личные сообщения)
     "video_source_chat": "https://t.me/arteeeeimKokaraev",
     "video_auto_find": True,
-    "video_message_ids": "5,6",
+    "video_message_ids": "5,6", # 5 - эксперт 6 - подкаст
     "video_interval": 150,
     # Общие настройки
     "delay_between_sends": 360,
@@ -63,11 +64,12 @@ class ForwarderApp(ctk.CTk):
         self.geometry("1100x800")
         self.minsize(900, 650)
 
-        self.running_tg = False      # Флаг для Telegram рассылки
-        self.running_email = False    # Флаг для email рассылки
-        self.task_thread = None
+        self.running_ls = False
+        self.running_groups = False
+        self.ls_thread = None
+        self.groups_thread = None
+        self.running_email = False
         self.email_thread = None
-        self.client = None
 
         self.config = self.load_config()
 
@@ -93,14 +95,20 @@ class ForwarderApp(ctk.CTk):
         self.button_frame = ctk.CTkFrame(self)
         self.button_frame.pack(side="bottom", fill="x", padx=10, pady=(0, 10))
 
-        self.start_stop_tg_button = ctk.CTkButton(
-            self.button_frame, text="Запустить Telegram рассылку",
-            command=self.toggle_tg_mailing
+        self.start_stop_ls_button = ctk.CTkButton(
+            self.button_frame, text="Запустить ЛС",
+            command=self.toggle_ls_mailing
         )
-        self.start_stop_tg_button.pack(side="left", padx=5, pady=5)
+        self.start_stop_ls_button.pack(side="left", padx=5, pady=5)
+
+        self.start_stop_groups_button = ctk.CTkButton(
+            self.button_frame, text="Запустить группы",
+            command=self.toggle_groups_mailing
+        )
+        self.start_stop_groups_button.pack(side="left", padx=5, pady=5)
 
         self.start_stop_email_button = ctk.CTkButton(
-            self.button_frame, text="Запустить Email рассылку",
+            self.button_frame, text="Запустить email",
             command=self.toggle_email_mailing
         )
         self.start_stop_email_button.pack(side="left", padx=5, pady=5)
@@ -108,6 +116,202 @@ class ForwarderApp(ctk.CTk):
         self.setup_log_redirect()
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
         self.setup_global_bindings()
+
+        self.tab_messages = self.tabview.add("Просмотр сообщений")
+        self.create_messages_tab()
+
+    def create_messages_tab(self):
+        """Вкладка для просмотра сообщений из канала/чата"""
+        # Поля ввода
+        ctk.CTkLabel(self.tab_messages, text="Чат (ссылка или username):").grid(row=0, column=0, padx=10, pady=5, sticky="w")
+        self.messages_chat_entry = ctk.CTkEntry(self.tab_messages, width=400)
+        self.messages_chat_entry.grid(row=0, column=1, padx=10, pady=5)
+        self.messages_chat_entry.insert(0, "https://t.me/arteeeeimKokaraev")
+
+        ctk.CTkLabel(self.tab_messages, text="Лимит сообщений:").grid(row=1, column=0, padx=10, pady=5, sticky="w")
+        self.messages_limit_entry = ctk.CTkEntry(self.tab_messages, width=100)
+        self.messages_limit_entry.grid(row=1, column=1, padx=10, pady=5, sticky="w")
+        self.messages_limit_entry.insert(0, "50")
+
+        ctk.CTkLabel(self.tab_messages, text="Фильтр по типу:").grid(row=2, column=0, padx=10, pady=5, sticky="w")
+        self.messages_filter_var = ctk.StringVar(value="Все")
+        filter_menu = ctk.CTkOptionMenu(self.tab_messages, 
+                                        values=["Все", "Текст", "Кружок", "Видео", "Голосовое", "Фото", "Документ"],
+                                        variable=self.messages_filter_var)
+        filter_menu.grid(row=2, column=1, padx=10, pady=5, sticky="w")
+
+        # Кнопка загрузки
+        self.load_messages_button = ctk.CTkButton(self.tab_messages, text="Загрузить сообщения", command=self.start_messages_loading)
+        self.load_messages_button.grid(row=3, column=0, columnspan=2, padx=10, pady=10)
+
+        # Текстовое поле для вывода
+        self.messages_output = ctk.CTkTextbox(self.tab_messages, wrap="none", font=("Courier", 11))
+        self.messages_output.grid(row=4, column=0, columnspan=2, padx=10, pady=5, sticky="nsew")
+        self.tab_messages.grid_rowconfigure(4, weight=1)
+        self.tab_messages.grid_columnconfigure(1, weight=1)
+
+    def start_messages_loading(self):
+        """Запускает загрузку сообщений в отдельном потоке"""
+        chat = self.messages_chat_entry.get().strip()
+        if not chat:
+            self.safe_insert_messages_output("Ошибка: укажите чат.\n")
+            return
+        try:
+            limit = int(self.messages_limit_entry.get())
+            if limit <= 0:
+                raise ValueError
+        except:
+            self.safe_insert_messages_output("Ошибка: лимит должен быть положительным числом.\n")
+            return
+
+        filter_type = self.messages_filter_var.get()
+        filter_type = None if filter_type == "Все" else filter_type
+
+        self.safe_clear_messages_output()
+        self.safe_insert_messages_output("Загрузка сообщений...\n")
+        self.load_messages_button.configure(state="disabled", text="Загрузка...")
+
+        # Запускаем в потоке
+        thread = threading.Thread(target=self.run_messages_loading, args=(chat, limit, filter_type), daemon=True)
+        thread.start()
+
+    def run_messages_loading(self, chat, limit, filter_type):
+        """Запускает асинхронную функцию в отдельном event loop"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            # Выполняем асинхронную загрузку, получаем список строк результата
+            lines = loop.run_until_complete(self.fetch_messages(chat, limit, filter_type))
+        except Exception as e:
+            lines = [f"Ошибка: {e}\n"]
+        finally:
+            # Даём время завершиться внутренним задачам Telethon
+            loop.run_until_complete(asyncio.sleep(0.1))
+            loop.close()
+            # Возвращаем результат в главный поток
+            self.after(0, self.display_messages_result, lines)
+            self.after(0, lambda: self.load_messages_button.configure(state="normal", text="Загрузить сообщения"))
+
+    def display_messages_result(self, lines):
+        """Выводит накопленные строки в текстовое поле"""
+        self.safe_clear_messages_output()
+        for line in lines:
+            self.safe_insert_messages_output(line)
+
+    async def fetch_messages(self, chat, limit, filter_type):
+        """Асинхронная загрузка сообщений через Telethon (возвращает список строк)"""
+        api_id = int(self.api_id_entry.get())
+        api_hash = self.api_hash_entry.get()
+        client = TelegramClient('temp_session', api_id, api_hash)
+
+        result_lines = []
+        try:
+            await client.start()
+            entity = await client.get_entity(chat)
+        except Exception as e:
+            result_lines.append(f"Не удалось найти чат: {e}\n")
+            await client.disconnect()
+            return result_lines
+
+        result_lines.append(f"=== Последние {limit} сообщений из {chat} ===\n\n")
+
+        count = 0
+        async for msg in client.iter_messages(entity, limit=limit):
+            msg_type = self.get_message_type_helper(msg)
+            if filter_type and filter_type not in msg_type:
+                continue
+
+            duration_str = ""
+            if msg.video_note or msg.video or msg.voice:
+                duration = None
+                if msg.video_note or msg.video:
+                    media = msg.video_note if msg.video_note else msg.video
+                    if hasattr(media, 'attributes'):
+                        for attr in media.attributes:
+                            if isinstance(attr, DocumentAttributeVideo):
+                                duration = attr.duration
+                                break
+                if msg.voice:
+                    for attr in msg.voice.attributes:
+                        if isinstance(attr, DocumentAttributeAudio) and attr.voice:
+                            duration = attr.duration
+                            break
+                    if duration is not None:
+                        duration_int = int(duration)  # преобразуем float в int (отбрасываем дробную часть)
+                        minutes = duration_int // 60
+                        seconds = duration_int % 60
+                        if minutes:
+                            duration_str = f" | Длительность: {minutes}:{seconds:02d}"
+                        else:
+                            duration_str = f" | Длительность: {seconds} сек"
+                    else:
+                        duration_str = " | Длительность: ?"
+
+            raw_content = msg.text if msg.text else getattr(msg.file, 'name', None)
+            content = raw_content if raw_content is not None else '—'
+            if len(content) > 100:
+                content = content[:100] + "..."
+            line = f"ID: {msg.id} | Тип: {msg_type}{duration_str} | Содержание: {content}\n"
+            result_lines.append(line)
+            count += 1
+
+        result_lines.append(f"\n--- Загружено {count} сообщений ---\n")
+        await client.disconnect()
+        return result_lines
+
+    def get_message_type_helper(self, message):
+        """Вспомогательная функция для определения типа сообщения (без self.log)"""
+        from telethon.tl.types import DocumentAttributeVideo, DocumentAttributeAudio
+        if message.text:
+            return "Текст"
+        if message.video_note:
+            return "Кружок"
+        if message.video:
+            return "Видео"
+        if message.voice:
+            return "Голосовое"
+        if message.photo:
+            return "Фото"
+        if message.document:
+            for attr in message.document.attributes:
+                if isinstance(attr, DocumentAttributeVideo):
+                    if attr.round_message:
+                        return "Кружок (документ)"
+                    else:
+                        return "Видео (документ)"
+                if isinstance(attr, DocumentAttributeAudio):
+                    if attr.voice:
+                        return "Голосовое (документ)"
+                    else:
+                        return "Аудио (музыка)"
+            return "Документ"
+        if message.sticker:
+            return "Стикер"
+        if message.poll:
+            return "Опрос"
+        if message.geo:
+            return "Геопозиция"
+        if message.contact:
+            return "Контакт"
+        return "Неизвестный тип"
+
+    def safe_insert_messages_output(self, text):
+        """Безопасная вставка текста в messages_output (в главном потоке)"""
+        def _insert():
+            if hasattr(self, 'messages_output') and self.messages_output:
+                self.messages_output.insert("end", text)
+                self.messages_output.see("end")
+            else:
+                self.log(text)  # fallback в лог
+        self.after(0, _insert)
+
+    def safe_clear_messages_output(self):
+        """Безопасная очистка messages_output"""
+        def _clear():
+            if hasattr(self, 'messages_output') and self.messages_output:
+                self.messages_output.delete("1.0", "end")
+        self.after(0, _clear)
+
     def setup_global_bindings(self):
         # Привязываем ко всем текстовым виджетам
         for widget in self.winfo_children():
@@ -473,7 +677,7 @@ class ForwarderApp(ctk.CTk):
         row += 1
 
         ctk.CTkLabel(self.tab_email, text="Пароль (или app password):").grid(row=row, column=0, padx=10, pady=5, sticky="w")
-        self.email_password_entry = ctk.CTkEntry(self.tab_email, width=300, show="*")
+        self.email_password_entry = ctk.CTkEntry(self.tab_email, width=300, show="")
         self.email_password_entry.grid(row=row, column=1, padx=10, pady=5)
         self.email_password_entry.insert(0, self.config.get("email_password", ""))
         row += 1
@@ -582,14 +786,16 @@ class ForwarderApp(ctk.CTk):
         self.log_text.see("end")
         self.update_idletasks()
 
-    # ---------- Управление Telegram рассылкой ----------
-    def toggle_tg_mailing(self):
-        if self.running_tg:
-            self.stop_tg_mailing()
+    # ---------- Управление рассылкой ЛС ----------
+    def toggle_ls_mailing(self):
+        if self.running_ls:
+            self.stop_ls_mailing()
         else:
-            self.start_tg_mailing()
+            self.start_ls_mailing()
 
-    def start_tg_mailing(self):
+    def start_ls_mailing(self):
+        if self.running_groups:
+            self.stop_groups_mailing()
         self.save_config()
         self.save_recipients()
         self.save_groups()
@@ -598,15 +804,79 @@ class ForwarderApp(ctk.CTk):
             self.log("Ошибка: не указаны API ID и/или API Hash")
             return
 
-        self.running_tg = True
-        self.start_stop_tg_button.configure(text="Остановить Telegram рассылку")
-        self.log("Запуск Telegram рассылки...")
-        self.task_thread = threading.Thread(target=self.run_async_loop, daemon=True)
-        self.task_thread.start()
+        self.running_ls = True
+        self.start_stop_ls_button.configure(text="Остановить ЛС")
+        self.log("Запуск рассылки ЛС...")
+        self.ls_thread = threading.Thread(target=self.run_ls_loop, daemon=True)
+        self.ls_thread.start()
 
-    def stop_tg_mailing(self):
-        self.running_tg = False
-        self.log("Остановка Telegram рассылки...")
+    def stop_ls_mailing(self):
+        self.running_ls = False
+        self.log("Остановка рассылки ЛС...")
+
+    def run_ls_loop(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self.async_ls_mode())
+        except Exception as e:
+            self.log(f"Критическая ошибка в ЛС: {e}")
+        finally:
+            loop.close()
+            self.after(0, lambda: self.start_stop_ls_button.configure(text="Запустить ЛС"))
+            self.running_ls = False
+
+    async def async_ls_mode(self):
+        api_id = int(self.api_id_entry.get())
+        api_hash = self.api_hash_entry.get()
+        tz_offset = int(self.tz_entry.get())
+        await self.run_private_mode(api_id, api_hash, tz_offset)
+
+    # ---------- Управление рассылкой групп ----------
+    def toggle_groups_mailing(self):
+        if self.running_groups:
+            self.stop_groups_mailing()
+        else:
+            self.start_groups_mailing()
+
+    def start_groups_mailing(self):
+        if self.running_ls:
+            self.stop_ls_mailing()
+        self.save_config()
+        self.save_recipients()
+        self.save_groups()
+
+        if not self.api_id_entry.get() or not self.api_hash_entry.get():
+            self.log("Ошибка: не указаны API ID и/или API Hash")
+            return
+
+        self.running_groups = True
+        self.start_stop_groups_button.configure(text="Остановить группы")
+        self.log("Запуск рассылки групп...")
+        self.groups_thread = threading.Thread(target=self.run_groups_loop, daemon=True)
+        self.groups_thread.start()
+
+    def stop_groups_mailing(self):
+        self.running_groups = False
+        self.log("Остановка рассылки групп...")
+
+    def run_groups_loop(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self.async_groups_mode())
+        except Exception as e:
+            self.log(f"Критическая ошибка в группах: {e}")
+        finally:
+            loop.close()
+            self.after(0, lambda: self.start_stop_groups_button.configure(text="Запустить группы"))
+            self.running_groups = False
+
+    async def async_groups_mode(self):
+        api_id = int(self.api_id_entry.get())
+        api_hash = self.api_hash_entry.get()
+        tz_offset = int(self.tz_entry.get())
+        await self.run_groups_mode(api_id, api_hash, tz_offset)
 
     # ---------- Управление Email рассылкой ----------
     def toggle_email_mailing(self):
