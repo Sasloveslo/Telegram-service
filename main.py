@@ -987,30 +987,6 @@ class ForwarderApp(ctk.CTk):
             self.log(f"Ошибка отправки на {to}: {e}")
             return False
 
-    # ---------- Асинхронные методы для Telegram ----------
-    def run_async_loop(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(self.async_main())
-        except Exception as e:
-            self.log(f"Критическая ошибка: {e}")
-        finally:
-            loop.close()
-            self.after(0, lambda: self.start_stop_tg_button.configure(text="Запустить Telegram рассылку"))
-            self.running_tg = False
-
-    async def async_main(self):
-        api_id = int(self.api_id_entry.get())
-        api_hash = self.api_hash_entry.get()
-        tz_offset = int(self.tz_entry.get())
-        mode = self.tabview.get()  # "Личные сообщения" или "Группы"
-
-        if mode == "Личные сообщения":
-            await self.run_private_mode(api_id, api_hash, tz_offset)
-        else:
-            await self.run_groups_mode(api_id, api_hash, tz_offset)
-
     # ---------- Режим личных сообщений ----------
     async def run_private_mode(self, api_id, api_hash, tz_offset):
         recipients_file = self.recipients_file_entry.get()
@@ -1261,27 +1237,27 @@ class ForwarderApp(ctk.CTk):
         cycle_num = 1
         schedule_delta = timedelta(seconds=cycle_interval)
 
-        while self.running_tg:
+        while self.running_groups:
             self.log(f"=== Цикл {cycle_num} ===")
             source_msg = random.choice(source_messages)
             self.log(f"Выбрано сообщение ID={source_msg.id} из чата {source_msg.chat_id}")
             for group in groups:
-                if not self.running_tg:
+                if not self.running_groups:
                     break
                 await self.forward_scheduled_message(client, group, source_msg, schedule_delta, tz_offset)
                 await asyncio.sleep(1)
 
-            if not self.running_tg:
+            if not self.running_groups:
                 break
 
             next_cycle_time = datetime.now() + schedule_delta
             next_cycle_local = next_cycle_time + timedelta(hours=tz_offset)
             self.log(f"Цикл {cycle_num} завершён. Следующий цикл в {next_cycle_local.strftime('%Y-%m-%d %H:%M:%S')} (через {cycle_interval // 60} минут).")
             for _ in range(cycle_interval // 5):
-                if not self.running_tg:
+                if not self.running_groups:  # ← исправлено
                     break
                 await asyncio.sleep(5)
-            if not self.running_tg:
+            if not self.running_groups:  # ← исправлено
                 break
             cycle_num += 1
 
@@ -1323,26 +1299,12 @@ class ForwarderApp(ctk.CTk):
             except Exception as e:
                 self.log(f"Ошибка при планировании в группу {group}: {e}")
                 break
-    def browse_recipients_file(self):
-        file_path = filedialog.askopenfilename(title="Выберите файл получателей")
-        if file_path:
-            self.recipients_file_entry.delete(0, "end")
-            self.recipients_file_entry.insert(0, file_path)
-            self.load_recipients_from_file()
-
-    def load_recipients_from_file(self):
-        file_path = self.recipients_file_entry.get()
-        if Path(file_path).exists():
-            with open(file_path, 'r', encoding='utf-8') as f:
-                self.recipients_text.delete("1.0", "end")
-                self.recipients_text.insert("1.0", f.read())
-            self.log(f"Загружен список получателей из {file_path}")
-        else:
-            self.log(f"Файл {file_path} не найден")
 
     def on_closing(self):
-        if self.running_tg and self.task_thread and self.task_thread.is_alive():
-            self.task_thread.join(timeout=2)
+        if self.running_ls and self.ls_thread and self.ls_thread.is_alive():
+            self.ls_thread.join(timeout=2)
+        if self.running_groups and self.groups_thread and self.groups_thread.is_alive():
+            self.groups_thread.join(timeout=2)
         if self.running_email and self.email_thread and self.email_thread.is_alive():
             self.email_thread.join(timeout=2)
         self.destroy()
