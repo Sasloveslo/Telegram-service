@@ -12,7 +12,7 @@
     "video_interval": 150,
     "delay_between_sends": 720,
     "group_cycle_interval": 1800,
-    "group_message_text": "Я вообще андрей",
+    "group_message_text": "",
     "tz_offset": 3,
     "log_file": "forwarder.log",
     "group_source_chat": "",

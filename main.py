@@ -6,6 +6,9 @@ import smtplib
 import sys
 import threading
 import time
+import queue
+
+from tkinter import simpledialog
 from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -70,6 +73,7 @@ class ForwarderApp(ctk.CTk):
         self.groups_thread = None
         self.running_email = False
         self.email_thread = None
+        self.client = None  
 
         self.config = self.load_config()
 
@@ -90,6 +94,13 @@ class ForwarderApp(ctk.CTk):
         self.create_groups_tab()
         self.create_email_tab()
         self.create_logs_tab()
+
+        sys.stdout = self.StreamRedirector(self.log, sys.__stdout__)
+        sys.stderr = self.StreamRedirector(self.log, sys.__stderr__)
+
+        import builtins
+        self.original_input = builtins.input
+        builtins.input = self.input_redirect
 
         # Кнопки управления (отдельно для Telegram и email)
         self.button_frame = ctk.CTkFrame(self)
@@ -119,6 +130,102 @@ class ForwarderApp(ctk.CTk):
 
         self.tab_messages = self.tabview.add("Просмотр сообщений")
         self.create_messages_tab()
+
+    class StreamRedirector:
+        """Перенаправляет stdout/stderr в лог-виджет"""
+        def __init__(self, log_callback, original_stream):
+            self.log_callback = log_callback
+            self.original_stream = original_stream
+
+        def write(self, text):
+            if text and text.strip():
+                self.log_callback(text.rstrip())
+            if self.original_stream:
+                self.original_stream.write(text)
+
+        def flush(self):
+            if self.original_stream:
+                self.original_stream.flush()
+        
+    def input_redirect(self, prompt=''):
+        """Перехватывает input() и показывает диалоговое окно (универсальный)"""
+        if prompt:
+            self.log(prompt.strip())
+
+        # Очередь для получения результата
+        result_queue = queue.Queue()
+
+        def show_dialog():
+            try:
+                # Создаём диалоговое окно
+                dialog = ctk.CTkToplevel(self)
+                dialog.title("Требуется ввод")
+                dialog.geometry("550x220")
+                dialog.transient(self)
+                dialog.grab_set()
+                dialog.focus_force()
+
+                # Центрируем окно
+                dialog.update_idletasks()
+                x = self.winfo_x() + (self.winfo_width() - 550) // 2
+                y = self.winfo_y() + (self.winfo_height() - 220) // 2
+                dialog.geometry(f"+{x}+{y}")
+
+                # Определяем тип запроса (пароль или обычный текст)
+                prompt_lower = prompt.lower()
+                is_password = any(word in prompt_lower for word in 
+                                ['password', 'пароль', '2fa', 'two-factor', 'two factor'])
+
+                # Метка с вопросом (делаем перенос строк)
+                label = ctk.CTkLabel(dialog, text=prompt, wraplength=500, justify="left")
+                label.pack(pady=(20, 10), padx=20)
+
+                # Поле ввода (со звездочками для пароля)
+                entry = ctk.CTkEntry(dialog, width=450, show="*" if is_password else "")
+                entry.pack(pady=5, padx=20)
+                entry.focus()
+
+                result = [""]
+
+                def on_ok():
+                    result[0] = entry.get()
+                    dialog.destroy()
+
+                def on_cancel():
+                    result[0] = ""
+                    dialog.destroy()
+
+                # Кнопки
+                button_frame = ctk.CTkFrame(dialog)
+                button_frame.pack(pady=15)
+
+                ctk.CTkButton(button_frame, text="OK", command=on_ok, width=100).pack(side="left", padx=10)
+                ctk.CTkButton(button_frame, text="Отмена", command=on_cancel, width=100).pack(side="left", padx=10)
+
+                # Привязываем Enter к OK
+                entry.bind("<Return>", lambda e: on_ok())
+
+                # Ждём закрытия окна
+                dialog.wait_window()
+                result_queue.put(result[0])
+
+            except Exception as e:
+                self.log(f"Ошибка диалога: {e}")
+                # Если диалог не сработал, используем терминал
+                self.log("Пожалуйста, введите данные в терминале:")
+                result_queue.put(self.original_input(prompt))
+
+        # Запускаем диалог в главном потоке
+        self.after(0, show_dialog)
+
+        # Ждём результат (с таймаутом)
+        while True:
+            try:
+                return result_queue.get(timeout=0.1)
+            except queue.Empty:
+                time.sleep(0.05)
+                if not self.winfo_exists():
+                    return ""
 
     def create_messages_tab(self):
         """Вкладка для просмотра сообщений из канала/чата"""
@@ -202,21 +309,24 @@ class ForwarderApp(ctk.CTk):
         """Асинхронная загрузка сообщений через Telethon (возвращает список строк)"""
         api_id = int(self.api_id_entry.get())
         api_hash = self.api_hash_entry.get()
-        client = TelegramClient('temp_session', api_id, api_hash)
+
+        # Используем общий клиент, если его нет - создаём
+        if self.client is None:
+            self.client = TelegramClient('user_session', api_id, api_hash)
+            await self.client.start()
+            self.log("Авторизация для просмотра сообщений успешна")
 
         result_lines = []
         try:
-            await client.start()
-            entity = await client.get_entity(chat)
+            entity = await self.client.get_entity(chat)
         except Exception as e:
             result_lines.append(f"Не удалось найти чат: {e}\n")
-            await client.disconnect()
             return result_lines
 
         result_lines.append(f"=== Последние {limit} сообщений из {chat} ===\n\n")
 
         count = 0
-        async for msg in client.iter_messages(entity, limit=limit):
+        async for msg in self.client.iter_messages(entity, limit=limit):
             msg_type = self.get_message_type_helper(msg)
             if filter_type and filter_type not in msg_type:
                 continue
@@ -236,16 +346,16 @@ class ForwarderApp(ctk.CTk):
                         if isinstance(attr, DocumentAttributeAudio) and attr.voice:
                             duration = attr.duration
                             break
-                    if duration is not None:
-                        duration_int = int(duration)  # преобразуем float в int (отбрасываем дробную часть)
-                        minutes = duration_int // 60
-                        seconds = duration_int % 60
-                        if minutes:
-                            duration_str = f" | Длительность: {minutes}:{seconds:02d}"
-                        else:
-                            duration_str = f" | Длительность: {seconds} сек"
+                if duration is not None:
+                    duration_int = int(duration)
+                    minutes = duration_int // 60
+                    seconds = duration_int % 60
+                    if minutes:
+                        duration_str = f" | Длительность: {minutes}:{seconds:02d}"
                     else:
-                        duration_str = " | Длительность: ?"
+                        duration_str = f" | Длительность: {seconds} сек"
+                else:
+                    duration_str = " | Длительность: ?"
 
             raw_content = msg.text if msg.text else getattr(msg.file, 'name', None)
             content = raw_content if raw_content is not None else '—'
@@ -256,7 +366,6 @@ class ForwarderApp(ctk.CTk):
             count += 1
 
         result_lines.append(f"\n--- Загружено {count} сообщений ---\n")
-        await client.disconnect()
         return result_lines
 
     def get_message_type_helper(self, message):
@@ -756,8 +865,29 @@ class ForwarderApp(ctk.CTk):
 
     # ---------- Вкладка логов ----------
     def create_logs_tab(self):
+        top_frame = ctk.CTkFrame(self.tab_logs)
+        top_frame.pack(fill="x", padx=10, pady=(10, 0))
+
+        self.clear_logs_button = ctk.CTkButton(
+            top_frame, text="Очистить логи", 
+            command=self.clear_logs, width=120
+        )
+        self.clear_logs_button.pack(side="right", padx=5, pady=5)
+
+        # Текстовое поле для логов (только один раз!)
         self.log_text = ctk.CTkTextbox(self.tab_logs, wrap="word")
-        self.log_text.pack(fill="both", expand=True, padx=10, pady=10)
+        self.log_text.pack(fill="both", expand=True, padx=10, pady=(5, 10))
+
+    def clear_logs(self):
+        """Очищает текстовое поле логов"""
+        self.log_text.delete("1.0", "end")
+    def log(self, message):
+        """Добавляет сообщение в текстовое поле логов (GUI-безопасно)"""
+        def _log():
+            if hasattr(self, 'log_text') and self.log_text:
+                self.log_text.insert("end", message + "\n")
+                self.log_text.see("end")
+        self.after(0, _log)
 
     def setup_log_redirect(self):
         class TextHandler(logging.Handler):
@@ -780,11 +910,6 @@ class ForwarderApp(ctk.CTk):
                 logger.addHandler(file_handler)
             except Exception as e:
                 self.log(f"Не удалось создать файл логов: {e}")
-
-    def log(self, message):
-        self.log_text.insert("end", message + "\n")
-        self.log_text.see("end")
-        self.update_idletasks()
 
     # ---------- Управление рассылкой ЛС ----------
     def toggle_ls_mailing(self):
@@ -995,14 +1120,21 @@ class ForwarderApp(ctk.CTk):
             self.log("Нет получателей для рассылки ЛС.")
             return
 
-        client = TelegramClient('user_session', api_id, api_hash)
-        self.client = client
-        try:
-            await client.start()
+        # Используем self.client, а не локальную переменную client
+        if self.client is None:
+            self.client = TelegramClient('user_session', api_id, api_hash)
+            await self.client.start()
             self.log("Авторизация успешна.")
+        else:
+            # Проверяем, что клиент всё ещё подключён
+            try:
+                await self.client.get_me()
+            except:
+                await self.client.start()
 
+        try:
             note_messages = await self.get_source_messages(
-                client,
+                self.client,  # ← исправлено: self.client
                 self.note_chat_entry.get(),
                 self.note_auto_var.get(),
                 self.note_ids_entry.get()
@@ -1012,7 +1144,7 @@ class ForwarderApp(ctk.CTk):
                 return
 
             video_messages = await self.get_source_messages(
-                client,
+                self.client,  # ← исправлено: self.client
                 self.video_chat_entry.get(),
                 self.video_auto_var.get(),
                 self.video_ids_entry.get()
@@ -1026,7 +1158,7 @@ class ForwarderApp(ctk.CTk):
             first_time = self.parse_start_time(self.start_time_entry.get())
 
             await self.schedule_forward_to_recipients(
-                client, recipients,
+                self.client, recipients,  # ← исправлено: self.client
                 note_messages, video_messages,
                 delay, first_time, tz_offset, video_interval
             )
@@ -1034,10 +1166,7 @@ class ForwarderApp(ctk.CTk):
             self.log("Неверный API_ID или API_HASH.")
         except Exception as e:
             self.log(f"Ошибка в режиме ЛС: {e}")
-        finally:
-            await client.disconnect()
-            self.client = None
-            self.log("Сессия закрыта.")
+        # НЕ отключаем клиент здесь!
 
     def load_recipients(self, file_path):
         if not Path(file_path).exists():
@@ -1300,13 +1429,32 @@ class ForwarderApp(ctk.CTk):
                 self.log(f"Ошибка при планировании в группу {group}: {e}")
                 break
 
+    async def close_client(self):
+        if self.client:
+            await self.client.disconnect()
+            self.client = None
+
     def on_closing(self):
+        # Восстанавливаем оригинальные потоки
+        sys.stdout = sys.__stdout__
+        sys.stderr = sys.__stderr__
+        if hasattr(self, 'original_input'):
+            import builtins
+            builtins.input = self.original_input
+
         if self.running_ls and self.ls_thread and self.ls_thread.is_alive():
             self.ls_thread.join(timeout=2)
         if self.running_groups and self.groups_thread and self.groups_thread.is_alive():
             self.groups_thread.join(timeout=2)
         if self.running_email and self.email_thread and self.email_thread.is_alive():
             self.email_thread.join(timeout=2)
+
+        # Закрываем клиент в отдельном потоке, чтобы не блокировать GUI
+        if self.client:
+            loop = asyncio.new_event_loop()
+            loop.run_until_complete(self.close_client())
+            loop.close()
+
         self.destroy()
 
 
