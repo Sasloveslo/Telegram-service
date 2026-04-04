@@ -19,29 +19,29 @@ from telethon.tl.types import DocumentAttributeVideo, DocumentAttributeAudio
 # ==================== КОНФИГУРАЦИЯ ====================
 CONFIG_FILE = "forwarder_config.json"
 DEFAULT_CONFIG = {
-    "api_id": "34531129",
-    "api_hash": "afcccc31d4a493b7035809b5dfc09386",
+    "api_id": "",
+    "api_hash": "",
     "recipients_file": "recipients.txt",
     "groups_file": "groups.txt",
     # Настройки для кружков (личные сообщения)
-    "note_source_chat": "https://t.me/arteeeeimKokaraev",
+    "note_source_chat": "",
     "note_auto_find": True,
-    "note_message_ids": "4,3", # 18 - энергия 
+    "note_message_ids": "", # 18 - энергия 
     # Настройки для видео (личные сообщения)
-    "video_source_chat": "https://t.me/arteeeeimKokaraev",
+    "video_source_chat": "",
     "video_auto_find": True,
-    "video_message_ids": "5,6", # 5 - эксперт 6 - подкаст
+    "video_message_ids": "", # 5 - эксперт 6 - подкаст
     "video_interval": 150,
     # Общие настройки
     "delay_between_sends": 360,
     "group_cycle_interval": 1800,
-    "group_message_text": "Я вообще андрей",
+    "group_message_text": "",
     "tz_offset": 3,
     "log_file": "forwarder.log",
     # Настройки для групп (пересылка сообщений)
-    "group_source_chat": "https://t.me/programmmmmmer",
+    "group_source_chat": "",
     "group_auto_find": True,
-    "group_message_ids": "4",
+    "group_message_ids": "",
     # ---------- НАСТРОЙКИ EMAIL ----------
     "email_smtp_server": "smtp.gmail.com",
     "email_smtp_port": 587,
