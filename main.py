@@ -18,6 +18,8 @@ import customtkinter as ctk
 from tkinter import filedialog
 from telethon import TelegramClient, errors
 from telethon.tl.types import DocumentAttributeVideo, DocumentAttributeAudio
+from telethon.tl.functions.messages import GetScheduledHistoryRequest
+from telethon.tl.functions.messages import GetScheduledHistoryRequest, DeleteScheduledMessagesRequest
 
 # ==================== КОНФИГУРАЦИЯ ====================
 CONFIG_FILE = "forwarder_config.json"
@@ -54,6 +56,9 @@ DEFAULT_CONFIG = {
     "email_body": "Это тестовое письмо.",
     "email_interval": 60,
     "emails_file": "emails.txt",
+
+    "verify_sent": True,  # Проверять реальную отправку сообщений
+    "verification_delay": 36000,  # Через сколько секунд проверять (по умолчанию 1 час)
 }
 
 logger = logging.getLogger("forwarder")
@@ -73,7 +78,6 @@ class ForwarderApp(ctk.CTk):
         self.groups_thread = None
         self.running_email = False
         self.email_thread = None
-        self.client = None  
 
         self.config = self.load_config()
 
@@ -93,6 +97,8 @@ class ForwarderApp(ctk.CTk):
         self.tab_groups = self.tabview.add("Группы")
         self.tab_email = self.tabview.add("Email рассылка")
         self.tab_logs = self.tabview.add("Логи")
+
+        self.create_check_scheduled_tab()
 
         self.create_settings_tab()
         self.create_private_tab()
@@ -128,6 +134,12 @@ class ForwarderApp(ctk.CTk):
             command=self.toggle_email_mailing
         )
         self.start_stop_email_button.pack(side="left", padx=5, pady=5)
+
+        self.check_scheduled_button = ctk.CTkButton(
+            self.button_frame, text="Проверить отложенные",
+            command=self.check_scheduled_messages
+        )
+        self.check_scheduled_button.pack(side="left", padx=5, pady=5)
 
         self.setup_log_redirect()
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -231,6 +243,172 @@ class ForwarderApp(ctk.CTk):
                 time.sleep(0.05)
                 if not self.winfo_exists():
                     return ""
+    async def verify_and_reschedule(self, client, recipient, scheduled_messages):
+        """
+        Проверяет, отправились ли запланированные сообщения.
+        Если нет - перепланирует их на более позднее время.
+        """
+        for msg_info in scheduled_messages:
+            msg_id = msg_info["message_id"]
+            try:
+                # Получаем историю чата с получателем
+                entity = await client.get_entity(recipient)
+                # Ищем наше сообщение по ID
+                msg = await client.get_messages(entity, ids=msg_id)
+
+                if msg and hasattr(msg, 'date') and msg.date > datetime.now(timezone.utc) - timedelta(hours=1):
+                    self.log(f"Сообщение {msg_id} для {recipient} успешно отправлено")
+                    return True
+                else:
+                    self.log(f"Сообщение {msg_id} для {recipient} не найдено или не отправлено")
+                    return False
+            except Exception as e:
+                self.log(f"Ошибка проверки сообщения {msg_id} для {recipient}: {e}")
+                return False
+
+    def check_scheduled_messages(self):
+        """Проверяет все запланированные сообщения и перепланирует застрявшие"""
+        self.log("Проверка отложенных сообщений...")
+        self.check_thread = threading.Thread(target=self.run_check_scheduled, daemon=True)
+        self.check_thread.start()
+
+    def run_check_scheduled(self):
+        """Запускает асинхронную проверку отложенных сообщений"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self.async_check_scheduled())
+        except Exception as e:
+            self.log(f"Ошибка проверки: {e}")
+        finally:
+            loop.close()
+    
+    async def async_check_scheduled(self):
+        """Асинхронная проверка отложенных сообщений"""
+        tracking_file = "scheduled_tracking.json"
+        if not Path(tracking_file).exists():
+            self.log("Нет отслеживаемых сообщений")
+            return
+
+        if not self.authorized or self.client is None:
+            self.log("❌ Профиль не авторизован! Сначала авторизуйтесь в настройках.")
+            return
+
+        with open(tracking_file, 'r', encoding='utf-8') as f:
+            scheduled_messages = json.load(f)
+
+        # Фильтруем только непроверенные или старые
+        to_check = [msg for msg in scheduled_messages if not msg.get("checked", False)]
+
+        if not to_check:
+            self.log("Все сообщения уже проверены")
+            return
+
+        tz_offset = int(self.tz_entry.get())
+
+        # Проверяем, что клиент всё ещё жив
+        try:
+            await self.client.get_me()
+        except:
+            self.log("⚠️ Сессия устарела. Пожалуйста, авторизуйтесь заново.")
+            self.authorized = False
+            self.current_user = None
+            self.after(0, self._update_profile_display, None)
+            return
+
+        rescheduled = []
+        still_pending = []
+
+        for item in to_check:
+            recipient = item.get("recipient")
+            if not recipient:
+                continue
+
+            schedule_time_str = item.get("schedule_time")
+            if not schedule_time_str:
+                continue
+
+            try:
+                schedule_time = datetime.fromisoformat(schedule_time_str)
+            except:
+                self.log(f"Неверный формат времени для {recipient}")
+                still_pending.append(recipient)
+                continue
+
+            # Если прошло больше 1 часа с запланированного времени
+            if datetime.now() > schedule_time + timedelta(hours=1):
+                self.log(f"Сообщение для {recipient} не отправилось в срок, перепланируем...")
+
+                # Отмечаем как проверенное
+                item["checked"] = True
+                rescheduled.append(recipient)
+            else:
+                # Ещё рано проверять
+                still_pending.append(recipient)
+
+        # Обновляем файл
+        with open(tracking_file, 'w', encoding='utf-8') as f:
+            json.dump(scheduled_messages, f, indent=4)
+
+        self.log(f"Проверка завершена. Просрочено: {len(rescheduled)}, ожидают: {len(still_pending)}")
+
+    async def reschedule_stuck_messages(self, client, recipient, original_schedule_time, note_msg, video_msg, video_interval, tz_offset):
+        """Перепланирует застрявшие сообщения на новое время"""
+        new_schedule_time = datetime.now() + timedelta(minutes=30)  # Через 30 минут
+
+        new_schedule_utc = new_schedule_time - timedelta(hours=tz_offset)
+
+        try:
+            entity = await client.get_entity(recipient)
+
+            # Отменяем старые отложенные сообщения (если можно)
+            # Telethon не имеет прямого метода для отмены, поэтому просто отправляем новые
+
+            # Отправляем новый кружок
+            await client.forward_messages(
+                entity,
+                note_msg,
+                drop_author=True,
+                schedule=new_schedule_utc
+            )
+
+            if video_interval > 0 and video_msg:
+                video_schedule_time = new_schedule_time + timedelta(seconds=video_interval)
+                video_schedule_utc = video_schedule_time - timedelta(hours=tz_offset)
+                await client.forward_messages(
+                    entity,
+                    video_msg,
+                    drop_author=True,
+                    schedule=video_schedule_utc
+                )
+
+            self.log(f"Перепланировано для {recipient} на {new_schedule_time}")
+            return True
+        except Exception as e:
+            self.log(f"Ошибка перепланирования для {recipient}: {e}")
+            return False
+
+    def save_scheduled_tracking(self, scheduled_data):
+        """Сохраняет информацию о запланированных сообщениях для последующей проверки"""
+        tracking_file = "scheduled_tracking.json"
+
+        # Загружаем существующие данные
+        existing_data = []
+        if Path(tracking_file).exists():
+            try:
+                with open(tracking_file, 'r', encoding='utf-8') as f:
+                    existing_data = json.load(f)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self.log("Ошибка чтения файла отслеживания, создаю новый")
+
+        # Добавляем новые данные
+        existing_data.extend(scheduled_data)
+
+        # Сохраняем обратно
+        with open(tracking_file, 'w', encoding='utf-8') as f:
+            json.dump(existing_data, f, indent=4, ensure_ascii=False)
+
+        self.log(f"Сохранено отслеживание для {len(scheduled_data)} получателей")
 
     def check_existing_session(self):
         """Проверяет, есть ли уже сохранённая сессия"""
@@ -266,6 +444,545 @@ class ForwarderApp(ctk.CTk):
         self.messages_output.grid(row=4, column=0, columnspan=2, padx=10, pady=5, sticky="nsew")
         self.tab_messages.grid_rowconfigure(4, weight=1)
         self.tab_messages.grid_columnconfigure(1, weight=1)
+
+    def create_check_scheduled_tab(self):
+        """Вкладка для проверки отложенных сообщений"""
+        self.tab_check = self.tabview.add("Проверка отложенных")
+
+        # === Верхняя панель с настройками ===
+        top_frame = ctk.CTkFrame(self.tab_check)
+        top_frame.pack(fill="x", padx=10, pady=10)
+
+        # Файл со списком для проверки
+        ctk.CTkLabel(top_frame, text="Файл со списком для проверки:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.check_list_entry = ctk.CTkEntry(top_frame, width=300)
+        self.check_list_entry.grid(row=0, column=1, padx=5, pady=5)
+        self.check_list_entry.insert(0, "check_list.txt")
+
+        self.browse_check_list_button = ctk.CTkButton(top_frame, text="Обзор", command=self.browse_check_list_file)
+        self.browse_check_list_button.grid(row=0, column=2, padx=5, pady=5)
+
+        self.load_check_list_button = ctk.CTkButton(top_frame, text="Загрузить список", command=self.load_check_list)
+        self.load_check_list_button.grid(row=0, column=3, padx=5, pady=5)
+
+        # Режим проверки
+        ctk.CTkLabel(top_frame, text="Режим проверки:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        self.check_mode_var = ctk.StringVar(value="Все чаты")
+        self.check_mode_menu = ctk.CTkOptionMenu(
+            top_frame, 
+            values=["Все чаты", "Только из списка"],
+            variable=self.check_mode_var
+        )
+        self.check_mode_menu.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+
+        # Фильтр по статусу
+        ctk.CTkLabel(top_frame, text="Фильтр:").grid(row=2, column=0, padx=5, pady=5, sticky="w")
+        self.filter_var = ctk.StringVar(value="Все")
+        self.filter_menu = ctk.CTkOptionMenu(
+            top_frame,
+            values=["Все", "С отложенными сообщениями", "Проблемные чаты"],
+            variable=self.filter_var
+        )
+        self.filter_menu.grid(row=2, column=1, padx=5, pady=5, sticky="w")
+
+        # Кнопки действий
+        button_frame = ctk.CTkFrame(top_frame)
+        button_frame.grid(row=3, column=0, columnspan=4, pady=10)
+
+        self.check_button = ctk.CTkButton(button_frame, text="🔍 Проверить", command=self.start_check_scheduled, width=120)
+        self.check_button.pack(side="left", padx=5)
+
+        self.clear_scheduled_button = ctk.CTkButton(button_frame, text="🗑️ Очистить отложенные", command=self.clear_scheduled_messages, width=150, fg_color="#8B0000")
+        self.clear_scheduled_button.pack(side="left", padx=5)
+
+        self.reschedule_button = ctk.CTkButton(button_frame, text="🔄 Перепланировать", command=self.reschedule_stuck_messages, width=150)
+        self.reschedule_button.pack(side="left", padx=5)
+
+        self.export_button = ctk.CTkButton(button_frame, text="📄 Экспорт отчёта", command=self.export_check_report, width=120)
+        self.export_button.pack(side="left", padx=5)
+
+        # === Редактор списка для проверки ===
+        ctk.CTkLabel(self.tab_check, text="Редактировать список для проверки (по одному на строку):").pack(anchor="w", padx=10, pady=(0, 5))
+        self.check_list_text = ctk.CTkTextbox(self.tab_check, height=120, wrap="none")
+        self.check_list_text.pack(fill="x", padx=10, pady=(0, 10))
+        self.save_check_list_button = ctk.CTkButton(self.tab_check, text="Сохранить список", command=self.save_check_list)
+        self.save_check_list_button.pack(anchor="w", padx=10, pady=(0, 10))
+
+        # === Таблица результатов ===
+        ctk.CTkLabel(self.tab_check, text="📊 Результаты проверки:").pack(anchor="w", padx=10, pady=(0, 5))
+
+        # Создаём frame для таблицы с прокруткой
+        table_frame = ctk.CTkFrame(self.tab_check)
+        table_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        # Заголовки таблицы
+        headers = ["Чат", "ID", "Отложенных", "Статус", "Действие"]
+        for col, header in enumerate(headers):
+            label = ctk.CTkLabel(table_frame, text=header, font=("Arial", 12, "bold"), width=150)
+            label.grid(row=0, column=col, padx=2, pady=2, sticky="ew")
+
+        # Текстовое поле для вывода результатов
+        self.check_results_text = ctk.CTkTextbox(table_frame, wrap="none", font=("Courier", 11))
+        self.check_results_text.grid(row=1, column=0, columnspan=5, padx=2, pady=2, sticky="nsew")
+        table_frame.grid_rowconfigure(1, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
+
+        # Статусная строка
+        self.check_status_label = ctk.CTkLabel(self.tab_check, text="Готов к проверке", font=("Arial", 11))
+        self.check_status_label.pack(anchor="w", padx=10, pady=(0, 10))
+
+    def browse_check_list_file(self):
+        """Выбор файла со списком для проверки"""
+        file_path = filedialog.askopenfilename(title="Выберите файл со списком")
+        if file_path:
+            self.check_list_entry.delete(0, "end")
+            self.check_list_entry.insert(0, file_path)
+            self.load_check_list()
+
+    def load_check_list(self):
+        """Загружает список для проверки из файла"""
+        file_path = self.check_list_entry.get()
+        if Path(file_path).exists():
+            with open(file_path, 'r', encoding='utf-8') as f:
+                self.check_list_text.delete("1.0", "end")
+                self.check_list_text.insert("1.0", f.read())
+            self.log(f"Загружен список для проверки из {file_path}")
+        else:
+            self.log(f"Файл {file_path} не найден")
+
+    def save_check_list(self):
+        """Сохраняет список для проверки в файл"""
+        content = self.check_list_text.get("1.0", "end-1c")
+        file_path = self.check_list_entry.get()
+        with open(file_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        self.log(f"Список для проверки сохранён в {file_path}")
+
+    def start_check_scheduled(self):
+        """Запускает проверку отложенных сообщений"""
+        if not self.authorized or self.client is None:
+            self.log("❌ Профиль не авторизован! Сначала авторизуйтесь в настройках.")
+            return
+
+        self.check_button.configure(state="disabled", text="⏳ Проверка...")
+        self.check_results_text.delete("1.0", "end")
+        self.check_results_text.insert("end", "Загрузка диалогов...\n")
+
+        thread = threading.Thread(target=self.run_check_scheduled_full, daemon=True)
+        thread.start()
+
+    def run_check_scheduled_full(self):
+        """Запускает полную проверку отложенных сообщений"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self.async_check_scheduled_full())
+        except Exception as e:
+            self.log(f"Ошибка проверки: {e}")
+        finally:
+            loop.close()
+            self.after(0, lambda: self.check_button.configure(state="normal", text="🔍 Проверить"))
+
+    from telethon.tl.functions.messages import GetScheduledHistoryRequest
+
+    async def async_check_scheduled_full(self):
+        """Полная асинхронная проверка отложенных сообщений"""
+        mode = self.check_mode_var.get()
+        filter_type = self.filter_var.get()
+
+        # Получаем список для проверки
+        check_list = []
+        if mode == "Только из списка":
+            check_list_text = self.check_list_text.get("1.0", "end-1c")
+            check_list = [line.strip() for line in check_list_text.split('\n') if line.strip()]
+
+        self.after(0, lambda: self.check_results_text.delete("1.0", "end"))
+
+        # СОЗДАЁМ НОВОГО ВРЕМЕННОГО КЛИЕНТА
+        api_id = int(self.api_id_entry.get())
+        api_hash = self.api_hash_entry.get()
+        client = TelegramClient('temp_session', api_id, api_hash)
+
+        results = []
+        total_scheduled = 0
+        problematic = 0
+
+        try:
+            await client.start()
+            self.after(0, lambda: self.check_results_text.insert("end", "Анализ диалогов...\n"))
+
+            async for dialog in client.iter_dialogs():
+                # Фильтруем по списку, если нужно
+                if mode == "Только из списка" and dialog.name not in check_list and str(dialog.id) not in check_list:
+                    continue
+
+                # ✅ ПРАВИЛЬНЫЙ СПОСОБ: используем GetScheduledHistoryRequest
+                scheduled_count = 0
+                try:
+                    # Получаем input entity для запроса
+                    input_entity = await client.get_input_entity(dialog.entity)
+                    result = await client(GetScheduledHistoryRequest(
+                        peer=input_entity,
+                        hash=0
+                    ))
+                    scheduled_count = len(result.messages) if result.messages else 0
+                except Exception as e:
+                    # Игнорируем ошибки для чатов, где нет прав
+                    if "CHAT_ADMIN_REQUIRED" not in str(e) and "not enough rights" not in str(e):
+                        self.log(f"Ошибка получения отложенных для {dialog.name}: {e}")
+                    scheduled_count = 0
+
+                total_scheduled += scheduled_count
+                status = "✅ Нормально" if scheduled_count == 0 else "⏳ Есть отложенные"
+
+                if scheduled_count > 0:
+                    problematic += 1
+
+                # Применяем фильтр
+                if filter_type == "С отложенными сообщениями" and scheduled_count == 0:
+                    continue
+                if filter_type == "Проблемные чаты" and scheduled_count == 0:
+                    continue
+
+                # Формируем строку результата
+                result_line = f"{dialog.name} | {dialog.id} | {scheduled_count} | {status}\n"
+                results.append(result_line)
+
+            # Выводим результаты
+            self.after(0, lambda: self.check_results_text.delete("1.0", "end"))
+
+            if results:
+                header = f"{'Чат':<30} | {'ID':<15} | {'Отложенных':<10} | Статус\n"
+                separator = "-" * 80 + "\n"
+                self.after(0, lambda: self.check_results_text.insert("end", header))
+                self.after(0, lambda: self.check_results_text.insert("end", separator))
+
+                for line in results:
+                    self.after(0, lambda l=line: self.check_results_text.insert("end", l))
+            else:
+                self.after(0, lambda: self.check_results_text.insert("end", "Нет чатов, соответствующих критериям\n"))
+
+            # Обновляем статус
+            status_text = f"📊 Проверка завершена. Всего отложенных: {total_scheduled}, Проблемных чатов: {problematic}"
+            self.after(0, lambda: self.check_status_label.configure(text=status_text))
+            self.log(status_text)
+
+        except Exception as e:
+            error_text = f"Ошибка проверки: {e}"
+            self.after(0, lambda: self.check_results_text.insert("end", error_text + "\n"))
+            self.log(error_text)
+        finally:
+            await client.disconnect()
+
+    def clear_scheduled_messages(self):
+        """Очищает все отложенные сообщения в выбранных чатах"""
+        # Получаем текст из результатов для парсинга
+        results_text = self.check_results_text.get("1.0", "end-1c")
+        if not results_text.strip():
+            self.log("Нет данных для очистки. Сначала выполните проверку.")
+            return
+
+        # Подтверждение
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Подтверждение")
+        dialog.geometry("400x150")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ctk.CTkLabel(dialog, text="Вы уверены, что хотите удалить все отложенные сообщения?", wraplength=350).pack(pady=20)
+
+        result = [False]
+        def confirm():
+            result[0] = True
+            dialog.destroy()
+        def cancel():
+            dialog.destroy()
+
+        button_frame = ctk.CTkFrame(dialog)
+        button_frame.pack(pady=10)
+        ctk.CTkButton(button_frame, text="Да, удалить", command=confirm, fg_color="#8B0000").pack(side="left", padx=10)
+        ctk.CTkButton(button_frame, text="Отмена", command=cancel).pack(side="left", padx=10)
+
+        dialog.wait_window()
+        if not result[0]:
+            return
+
+        self.log("Начинаю очистку отложенных сообщений...")
+        thread = threading.Thread(target=self.run_clear_scheduled, daemon=True)
+        thread.start()
+
+    def run_clear_scheduled(self):
+        """Запускает очистку отложенных сообщений"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self.async_clear_scheduled())
+        except Exception as e:
+            self.log(f"Ошибка очистки: {e}")
+        finally:
+            loop.close()
+
+    from telethon.tl.functions.messages import GetScheduledHistoryRequest, DeleteScheduledMessagesRequest
+
+    async def async_clear_scheduled(self):
+        """Асинхронная очистка отложенных сообщений"""
+        results_text = self.check_results_text.get("1.0", "end-1c")
+        lines = results_text.strip().split('\n')
+
+        api_id = int(self.api_id_entry.get())
+        api_hash = self.api_hash_entry.get()
+        client = TelegramClient('temp_session', api_id, api_hash)
+
+        cleared = 0
+        errors = 0
+
+        try:
+            await client.start()
+
+            for line in lines:
+                if '|' not in line or 'Ошибка' in line:
+                    continue
+
+                parts = line.split('|')
+                if len(parts) >= 2:
+                    chat_name = parts[0].strip()
+                    chat_id_str = parts[1].strip()
+
+                    try:
+                        # Получаем entity
+                        try:
+                            entity = await client.get_entity(int(chat_id_str))
+                        except:
+                            entity = await client.get_entity(chat_name)
+
+                        input_entity = await client.get_input_entity(entity)
+
+                        # Получаем отложенные сообщения
+                        result = await client(GetScheduledHistoryRequest(
+                            peer=input_entity,
+                            hash=0
+                        ))
+
+                        if result.messages:
+                            # Удаляем их
+                            await client(DeleteScheduledMessagesRequest(
+                                peer=input_entity,
+                                id=[msg.id for msg in result.messages]
+                            ))
+                            cleared += len(result.messages)
+                            self.log(f"Очищены отложенные в {chat_name} ({len(result.messages)} сообщений)")
+
+                    except Exception as e:
+                        self.log(f"Ошибка очистки {chat_name}: {e}")
+                        errors += 1
+        finally:
+            await client.disconnect()
+
+        self.log(f"Очистка завершена. Удалено сообщений: {cleared}, Ошибок: {errors}")
+
+    def reschedule_stuck_messages(self):
+        """Перепланирование застрявших сообщений"""
+        # Проверяем, есть ли данные для перепланирования
+        tracking_file = "scheduled_tracking.json"
+        if not Path(tracking_file).exists():
+            self.log("❌ Нет данных о запланированных сообщениях. Сначала выполните рассылку.")
+            return
+
+        # Проверяем авторизацию
+        if not self.authorized or self.client is None:
+            self.log("❌ Профиль не авторизован! Сначала авторизуйтесь в настройках.")
+            return
+
+        # Загружаем данные
+        with open(tracking_file, 'r', encoding='utf-8') as f:
+            scheduled_data = json.load(f)
+
+        # Фильтруем только непроверенные или проблемные сообщения
+        stuck_messages = [msg for msg in scheduled_data if not msg.get("checked", False)]
+
+        if not stuck_messages:
+            self.log("✅ Нет застрявших сообщений для перепланирования.")
+            return
+
+        # Подтверждение действия
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Подтверждение")
+        dialog.geometry("450x200")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        dialog.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() - 450) // 2
+        y = self.winfo_y() + (self.winfo_height() - 200) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        ctk.CTkLabel(dialog, text=f"Найдено {len(stuck_messages)} получателей с застрявшими сообщениями.", wraplength=400).pack(pady=(20, 5))
+        ctk.CTkLabel(dialog, text="Перепланировать их?", wraplength=400).pack(pady=(0, 10))
+
+        result = [False]
+        def confirm():
+            result[0] = True
+            dialog.destroy()
+        def cancel():
+            dialog.destroy()
+
+        button_frame = ctk.CTkFrame(dialog)
+        button_frame.pack(pady=10)
+        ctk.CTkButton(button_frame, text="Да, перепланировать", command=confirm, fg_color="#006400", width=150).pack(side="left", padx=10)
+        ctk.CTkButton(button_frame, text="Отмена", command=cancel, width=100).pack(side="left", padx=10)
+
+        dialog.wait_window()
+        if not result[0]:
+            self.log("Перепланирование отменено.")
+            return
+
+        self.log(f"🔄 Начинаю перепланирование для {len(stuck_messages)} получателей...")
+
+        # Запускаем в отдельном потоке
+        thread = threading.Thread(target=self.run_reschedule, daemon=True)
+        thread.start()
+
+        def run_reschedule(self):
+            """Запускает асинхронное перепланирование"""
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self.async_reschedule())
+            except Exception as e:
+                self.log(f"Ошибка перепланирования: {e}")
+            finally:
+                loop.close()
+
+        async def async_reschedule(self):
+            """Асинхронное перепланирование застрявших сообщений"""
+            tracking_file = "scheduled_tracking.json"
+
+            with open(tracking_file, 'r', encoding='utf-8') as f:
+                scheduled_data = json.load(f)
+
+            # Получаем исходные сообщения для перепланирования
+            api_id = int(self.api_id_entry.get())
+            api_hash = self.api_hash_entry.get()
+
+            # Создаём временного клиента
+            client = TelegramClient('temp_session', api_id, api_hash)
+
+            try:
+                await client.start()
+                self.log("✅ Авторизация для перепланирования успешна")
+
+                # Получаем сообщения для первого и второго слота
+                messages_1 = await self.get_source_messages(
+                    client,
+                    self.ls_chat_1_entry.get(),
+                    self.ls_auto_1_var.get(),
+                    self.ls_ids_1_entry.get()
+                )
+                if not messages_1:
+                    self.log("❌ Не удалось получить сообщения для первого слота")
+                    return
+
+                messages_2 = await self.get_source_messages(
+                    client,
+                    self.ls_chat_2_entry.get(),
+                    self.ls_auto_2_var.get(),
+                    self.ls_ids_2_entry.get()
+                )
+                if not messages_2:
+                    self.log("❌ Не удалось получить сообщения для второго слота")
+                    return
+
+                msg_interval = int(self.ls_interval_entry.get())
+                tz_offset = int(self.tz_entry.get())
+
+                rescheduled_count = 0
+                error_count = 0
+
+                # Получаем текущее время как базовое для перепланирования
+                now = datetime.now()
+                current_time = now + timedelta(seconds=30)  # Начинаем через 30 секунд
+
+                for item in scheduled_data:
+                    if item.get("checked", False):
+                        continue  # Пропускаем уже проверенные
+
+                    recipient = item.get("recipient")
+                    if not recipient:
+                        continue
+
+                    self.log(f"🔄 Перепланирование для {recipient}...")
+
+                    # Время для первого сообщения
+                    time_1 = current_time
+                    time_1_utc = time_1 - timedelta(hours=tz_offset)
+
+                    # Время для второго сообщения (через msg_interval)
+                    time_2 = time_1 + timedelta(seconds=msg_interval)
+                    time_2_utc = time_2 - timedelta(hours=tz_offset)
+
+                    try:
+                        entity = await client.get_entity(recipient)
+
+                        # Отправляем первое сообщение
+                        msg_1 = random.choice(messages_1)
+                        await client.forward_messages(
+                            entity, msg_1,
+                            drop_author=True,
+                            schedule=time_1_utc
+                        )
+
+                        # Отправляем второе сообщение
+                        msg_2 = random.choice(messages_2)
+                        await client.forward_messages(
+                            entity, msg_2,
+                            drop_author=True,
+                            schedule=time_2_utc
+                        )
+
+                        self.log(f"  ✅ Перепланировано для {recipient}: 1-е на {time_1.strftime('%H:%M:%S')}, 2-е на {time_2.strftime('%H:%M:%S')}")
+                        rescheduled_count += 1
+
+                        # Отмечаем как перепланированное
+                        item["checked"] = True
+                        item["rescheduled"] = True
+                        item["new_schedule_time_1"] = time_1.isoformat()
+                        item["new_schedule_time_2"] = time_2.isoformat()
+
+                        # Увеличиваем текущее время для следующего получателя (интервал 530 секунд = 8 минут 50 секунд)
+                        current_time += timedelta(seconds=530)
+
+                    except Exception as e:
+                        self.log(f"  ❌ Ошибка перепланирования для {recipient}: {e}")
+                        error_count += 1
+
+                # Сохраняем обновлённые данные
+                with open(tracking_file, 'w', encoding='utf-8') as f:
+                    json.dump(scheduled_data, f, indent=4, ensure_ascii=False)
+
+                self.log(f"📊 Перепланирование завершено. Успешно: {rescheduled_count}, Ошибок: {error_count}")
+
+            except Exception as e:
+                self.log(f"❌ Ошибка в процессе перепланирования: {e}")
+            finally:
+                await client.disconnect()
+
+    def export_check_report(self):
+        """Экспорт отчёта в файл"""
+        results_text = self.check_results_text.get("1.0", "end-1c")
+        if not results_text.strip():
+            self.log("Нет данных для экспорта")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            title="Сохранить отчёт",
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+
+        if file_path:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(results_text)
+            self.log(f"Отчёт сохранён в {file_path}")
 
     def start_messages_loading(self):
         """Запускает загрузку сообщений в отдельном потоке"""
@@ -657,36 +1374,31 @@ class ForwarderApp(ctk.CTk):
         threading.Thread(target=auth_thread, daemon=True).start()
 
     async def _do_authorize(self):
-        """Асинхронная авторизация профиля"""
+        """Асинхронная проверка авторизации (без сохранения клиента)"""
         api_id = int(self.api_id_entry.get())
         api_hash = self.api_hash_entry.get()
 
-        # Создаём клиент для авторизации
+        # Временный клиент только для проверки
         client = TelegramClient('user_session', api_id, api_hash)
 
         try:
             await client.start()
-            # Получаем информацию о пользователе
             me = await client.get_me()
 
             self.current_user = me
             self.authorized = True
-            self.client = client  # сохраняем авторизованный клиент
+            # НЕ сохраняем client в self.client!
 
-            # Обновляем интерфейс с информацией о профиле
             self.after(0, self._update_profile_display, me)
-
-            self.log(f"✅ Авторизация успешна! Вы вошли как: {me.first_name} {me.last_name or ''} (@{me.username or 'нет username'})")
+            self.log(f"✅ Авторизация успешна! Вы вошли как: {me.first_name}")
 
         except Exception as e:
             self.authorized = False
             self.current_user = None
-            self.client = None
             self.log(f"❌ Ошибка авторизации: {e}")
             self.after(0, self._update_profile_display, None)
         finally:
-            if not self.authorized:
-                await client.disconnect()
+            await client.disconnect()  # Закрываем временный клиент
 
     def _update_profile_display(self, user):
         """Обновляет отображение информации о профиле"""
@@ -1374,31 +2086,33 @@ class ForwarderApp(ctk.CTk):
     async def run_private_mode(self, api_id, api_hash, tz_offset):
         """Режим ЛС - пересылка 2 любых сообщений"""
 
-        # Проверяем авторизацию
-        if not self.authorized or self.client is None:
+        # Проверяем, есть ли файл сессии (авторизованы ли мы)
+        if not Path("user_session.session").exists():
             self.log("❌ Профиль не авторизован! Сначала авторизуйтесь в настройках.")
             return
 
-        recipients_file = self.recipients_file_entry.get()
-        recipients = self.load_recipients(recipients_file)
-        if not recipients:
-            self.log("Нет получателей для рассылки ЛС.")
+        # Проверяем, что у нас есть api_id и api_hash
+        if not api_id or not api_hash:
+            self.log("❌ Не указаны API ID или API Hash")
             return
 
-        # Проверяем, что клиент всё ещё жив
-        try:
-            await self.client.get_me()
-        except:
-            self.log("⚠️ Сессия устарела. Пожалуйста, авторизуйтесь заново.")
-            self.authorized = False
-            self.current_user = None
-            self.after(0, self._update_profile_display, None)
-            return
+        # СОЗДАЁМ НОВОГО КЛИЕНТА (используем сохранённую сессию)
+        client = TelegramClient('user_session', api_id, api_hash)
 
         try:
+            await client.start()
+            self.log("✅ Клиент подключён")
+
+            # Получаем получателей
+            recipients_file = self.recipients_file_entry.get()
+            recipients = self.load_recipients(recipients_file)
+            if not recipients:
+                self.log("Нет получателей для рассылки ЛС.")
+                return
+
             # Получаем сообщения для первого и второго слота
             messages_1 = await self.get_source_messages(
-                self.client,
+                client,
                 self.ls_chat_1_entry.get(),
                 self.ls_auto_1_var.get(),
                 self.ls_ids_1_entry.get()
@@ -1408,7 +2122,7 @@ class ForwarderApp(ctk.CTk):
                 return
 
             messages_2 = await self.get_source_messages(
-                self.client,
+                client,
                 self.ls_chat_2_entry.get(),
                 self.ls_auto_2_var.get(),
                 self.ls_ids_2_entry.get()
@@ -1422,14 +2136,18 @@ class ForwarderApp(ctk.CTk):
             first_time = self.parse_start_time(self.start_time_entry.get())
 
             await self.schedule_two_messages(
-                self.client, recipients,
+                client, recipients,
                 messages_1, messages_2,
                 delay, msg_interval, first_time, tz_offset
             )
+
         except errors.rpcerrorlist.ApiIdInvalidError:
             self.log("Неверный API_ID или API_HASH.")
         except Exception as e:
             self.log(f"Ошибка в режиме ЛС: {e}")
+        finally:
+            await client.disconnect()
+            self.log("Клиент отключён")
 
     def load_recipients(self, file_path):
         if not Path(file_path).exists():
@@ -1571,6 +2289,9 @@ class ForwarderApp(ctk.CTk):
         fail_videos = 0
         total = len(recipients)
 
+        # Список для отслеживания запланированных сообщений
+        scheduled_tracking = []
+
         now = datetime.now()
         if first_time and first_time > now:
             first_schedule = first_time
@@ -1584,25 +2305,44 @@ class ForwarderApp(ctk.CTk):
 
             self.log(f"[{i}/{total}] Планирование для {recipient} на {display_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
+            # Словарь для хранения информации о текущем получателе
+            recipient_tracking = {
+                "recipient": recipient,
+                "schedule_time": schedule_time.isoformat(),
+                "note_scheduled": False,
+                "video_scheduled": False,
+                "note_msg_id": None,
+                "video_msg_id": None
+            }
+
             # 1. Отправка кружка (выбираем случайный из списка)
-            note_msg = random.choice(note_msgs)
+            note_msg = random.choice(note_msgs) if note_msgs else None
             if note_msg:
                 try:
                     entity = await client.get_entity(recipient)
-                    await client.forward_messages(
+                    result = await client.forward_messages(
                         entity,
                         note_msg,
                         drop_author=True,
                         schedule=schedule_time_utc
                     )
                     success_notes += 1
+                    recipient_tracking["note_scheduled"] = True
+                    # Сохраняем ID запланированного сообщения (если доступно)
+                    if hasattr(result, 'id'):
+                        recipient_tracking["note_msg_id"] = result.id
+                    self.log(f"  Кружок запланирован")
                 except errors.FloodWaitError as e:
                     self.log(f"Flood wait для {recipient}: ждём {e.seconds} сек")
                     await asyncio.sleep(e.seconds)
                     try:
                         entity = await client.get_entity(recipient)
-                        await client.forward_messages(entity, note_msg, drop_author=True, schedule=schedule_time_utc)
+                        result = await client.forward_messages(entity, note_msg, drop_author=True, schedule=schedule_time_utc)
                         success_notes += 1
+                        recipient_tracking["note_scheduled"] = True
+                        if hasattr(result, 'id'):
+                            recipient_tracking["note_msg_id"] = result.id
+                        self.log(f"  Кружок запланирован (после ожидания)")
                     except Exception as e2:
                         self.log(f"Ошибка при повторной отправке кружка {recipient}: {e2}")
                         fail_notes += 1
@@ -1620,21 +2360,28 @@ class ForwarderApp(ctk.CTk):
                 video_msg = random.choice(video_msgs)
                 try:
                     entity = await client.get_entity(recipient)
-                    await client.forward_messages(
+                    result = await client.forward_messages(
                         entity,
                         video_msg,
                         drop_author=True,
                         schedule=video_schedule_utc
                     )
                     success_videos += 1
+                    recipient_tracking["video_scheduled"] = True
+                    if hasattr(result, 'id'):
+                        recipient_tracking["video_msg_id"] = result.id
                     self.log(f"  Видео запланировано на {video_display.strftime('%Y-%m-%d %H:%M:%S')}")
                 except errors.FloodWaitError as e:
                     self.log(f"Flood wait для видео {recipient}: ждём {e.seconds} сек")
                     await asyncio.sleep(e.seconds)
                     try:
                         entity = await client.get_entity(recipient)
-                        await client.forward_messages(entity, video_msg, drop_author=True, schedule=video_schedule_utc)
+                        result = await client.forward_messages(entity, video_msg, drop_author=True, schedule=video_schedule_utc)
                         success_videos += 1
+                        recipient_tracking["video_scheduled"] = True
+                        if hasattr(result, 'id'):
+                            recipient_tracking["video_msg_id"] = result.id
+                        self.log(f"  Видео запланировано (после ожидания)")
                     except Exception as e2:
                         self.log(f"Ошибка при повторной отправке видео {recipient}: {e2}")
                         fail_videos += 1
@@ -1642,58 +2389,72 @@ class ForwarderApp(ctk.CTk):
                     self.log(f"Ошибка планирования видео {recipient}: {e}")
                     fail_videos += 1
 
+            # Если хотя бы одно сообщение было запланировано, добавляем в отслеживание
+            if recipient_tracking["note_scheduled"] or recipient_tracking["video_scheduled"]:
+                scheduled_tracking.append(recipient_tracking)
+
+        # Сохраняем отслеживание запланированных сообщений
+        if scheduled_tracking:
+            self.save_scheduled_tracking(scheduled_tracking)
+
         self.log(f"Планирование завершено. Кружки: успешно {success_notes}, ошибок {fail_notes}. Видео: успешно {success_videos}, ошибок {fail_videos}")
 
     # ---------- Режим групп ----------
     async def run_groups_mode(self, api_id, api_hash, tz_offset):
         """Режим групп: бесконечно пересылает случайное сообщение из указанного чата во все группы"""
 
-        # Проверяем авторизацию
-        if not self.authorized or self.client is None:
+        # Проверяем, есть ли файл сессии (авторизованы ли мы)
+        if not Path("user_session.session").exists():
             self.log("❌ Профиль не авторизован! Сначала авторизуйтесь в настройках.")
             return
 
+        # Проверяем, что у нас есть api_id и api_hash
+        if not api_id or not api_hash:
+            self.log("❌ Не указаны API ID или API Hash")
+            return
+
+        # Загружаем список групп
         groups_file = self.groups_file_entry.get()
         groups = self.load_groups(groups_file)
         if not groups:
             self.log("Нет групп для рассылки.")
             return
 
+        # Получаем интервал между циклами
         cycle_interval = int(self.group_interval_entry.get())
         if cycle_interval <= 0:
             self.log("Интервал между циклами должен быть больше 0.")
             return
 
-        # Проверяем, что клиент всё ещё жив
-        try:
-            await self.client.get_me()
-        except:
-            self.log("⚠️ Сессия устарела. Пожалуйста, авторизуйтесь заново.")
-            self.authorized = False
-            self.current_user = None
-            self.after(0, self._update_profile_display, None)
-            return
+        # Получаем настройки источника сообщений
+        source_chat = self.group_chat_entry.get()
+        auto_find = self.group_auto_var.get()
+        ids_str = self.group_ids_entry.get()
+
+        # СОЗДАЁМ НОВОГО КЛИЕНТА (используем сохранённую сессию)
+        client = TelegramClient('user_session', api_id, api_hash)
 
         try:
-            source_chat = self.group_chat_entry.get()
-            auto_find = self.group_auto_var.get()
-            ids_str = self.group_ids_entry.get()
+            await client.start()
+            self.log("✅ Клиент подключён")
 
+            # Получаем сообщения-источники из указанного чата
             source_messages = await self.get_source_messages(
-                self.client,
+                client,
                 source_chat,
                 auto_find,
                 ids_str
             )
 
             if not source_messages:
-                self.log(f"Не удалось получить ни одного сообщения из чата {source_chat}. Отмена.")
+                self.log(f"❌ Не удалось получить ни одного сообщения из чата {source_chat}. Отмена.")
                 return
 
-            self.log(f"Загружено {len(source_messages)} сообщений-источников (ID: {', '.join(str(m.id) for m in source_messages)}).")
+            self.log(f"📥 Загружено {len(source_messages)} сообщений-источников (ID: {', '.join(str(m.id) for m in source_messages)}).")
 
+            # Запускаем бесконечную рассылку с пересылкой
             await self.infinite_scheduled_group_mailing(
-                self.client,
+                client,
                 groups,
                 source_messages,
                 cycle_interval,
@@ -1701,43 +2462,52 @@ class ForwarderApp(ctk.CTk):
             )
 
         except errors.rpcerrorlist.ApiIdInvalidError:
-            self.log("Неверный API_ID или API_HASH.")
+            self.log("❌ Неверный API_ID или API_HASH.")
         except Exception as e:
-            self.log(f"Ошибка в режиме групп: {e}")
+            self.log(f"❌ Ошибка в режиме групп: {e}")
+        finally:
+            await client.disconnect()
+            self.log("🔌 Клиент отключён")
 
     def load_groups(self, file_path):
+        """Загружает список групп из файла"""
         if not Path(file_path).exists():
-            self.log(f"Файл групп не найден: {file_path}")
+            self.log(f"⚠️ Файл групп не найден: {file_path}")
             return []
         with open(file_path, 'r', encoding='utf-8') as f:
             return [line.strip() for line in f if line.strip()]
 
     async def infinite_scheduled_group_mailing(self, client, groups, source_messages, cycle_interval, tz_offset):
+        """Бесконечная рассылка с пересылкой сообщений в группы"""
         cycle_num = 1
         schedule_delta = timedelta(seconds=cycle_interval)
 
         while self.running_groups:
             self.log(f"=== Цикл {cycle_num} ===")
             source_msg = random.choice(source_messages)
-            self.log(f"Выбрано сообщение ID={source_msg.id} из чата {source_msg.chat_id}")
+            self.log(f"📨 Выбрано сообщение ID={source_msg.id} из чата {source_msg.chat_id}")
+
             for group in groups:
                 if not self.running_groups:
                     break
                 await self.forward_scheduled_message(client, group, source_msg, schedule_delta, tz_offset)
-                await asyncio.sleep(1)
+                await asyncio.sleep(1)  # небольшая пауза между группами
 
             if not self.running_groups:
                 break
 
             next_cycle_time = datetime.now() + schedule_delta
             next_cycle_local = next_cycle_time + timedelta(hours=tz_offset)
-            self.log(f"Цикл {cycle_num} завершён. Следующий цикл в {next_cycle_local.strftime('%Y-%m-%d %H:%M:%S')} (через {cycle_interval // 60} минут).")
+            self.log(f"⏳ Цикл {cycle_num} завершён. Следующий цикл в {next_cycle_local.strftime('%Y-%m-%d %H:%M:%S')} (через {cycle_interval // 60} минут).")
+
+            # Ждём интервал, но с возможностью остановки каждые 5 секунд
             for _ in range(cycle_interval // 5):
-                if not self.running_groups:  # ← исправлено
+                if not self.running_groups:
                     break
                 await asyncio.sleep(5)
-            if not self.running_groups:  # ← исправлено
+            if not self.running_groups:
                 break
+
             cycle_num += 1
 
     async def forward_scheduled_message(self, client, group, source_msg, schedule_delta, tz_offset):
@@ -1786,6 +2556,28 @@ class ForwarderApp(ctk.CTk):
             except:
                 pass
             self.client = None
+
+    def save_scheduled_tracking(self, scheduled_data):
+        """Сохраняет информацию о запланированных сообщениях для последующей проверки"""
+        tracking_file = "scheduled_tracking.json"
+
+        # Загружаем существующие данные
+        existing_data = []
+        if Path(tracking_file).exists():
+            try:
+                with open(tracking_file, 'r', encoding='utf-8') as f:
+                    existing_data = json.load(f)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                self.log("Ошибка чтения файла отслеживания, создаю новый")
+
+        # Добавляем новые данные
+        existing_data.extend(scheduled_data)
+
+        # Сохраняем обратно
+        with open(tracking_file, 'w', encoding='utf-8') as f:
+            json.dump(existing_data, f, indent=4, ensure_ascii=False)
+
+        self.log(f"Сохранено отслеживание для {len(scheduled_data)} получателей")
 
     def on_closing(self):
         # Восстанавливаем оригинальные потоки
