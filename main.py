@@ -27,14 +27,14 @@ DEFAULT_CONFIG = {
     "recipients_file": "recipients.txt",
     "groups_file": "groups.txt",
     # Настройки для кружков (личные сообщения)
-    "note_source_chat": "",
-    "note_auto_find": True,
-    "note_message_ids": "", # 18 - энергия 
-    # Настройки для видео (личные сообщения)
-    "video_source_chat": "",
-    "video_auto_find": True,
-    "video_message_ids": "", # 5 - эксперт 6 - подкаст
-    "video_interval": 150,
+    "ls_source_chat_1": "",           # чат для первого сообщения
+    "ls_auto_find_1": True,
+    "ls_message_ids_1": "",
+    "ls_source_chat_2": "",           # чат для второго сообщения
+    "ls_auto_find_2": True,
+    "ls_message_ids_2": "",
+    "ls_message_interval": 150,       # интервал между сообщениями
+    "delay_between_sends": 360,
     # Общие настройки
     "delay_between_sends": 360,
     "group_cycle_interval": 1800,
@@ -82,6 +82,11 @@ class ForwarderApp(ctk.CTk):
 
         self.tabview = ctk.CTkTabview(self)
         self.tabview.pack(fill="both", expand=True, padx=10, pady=10)
+
+
+        self.authorized = False
+        self.current_user = None
+        self.after(100, self.check_existing_session)
 
         self.tab_settings = self.tabview.add("Настройки")
         self.tab_private = self.tabview.add("Личные сообщения")
@@ -227,6 +232,11 @@ class ForwarderApp(ctk.CTk):
                 if not self.winfo_exists():
                     return ""
 
+    def check_existing_session(self):
+        """Проверяет, есть ли уже сохранённая сессия"""
+        if Path("user_session.session").exists():
+            self.log("🔍 Обнаружена сохранённая сессия. Нажмите 'Авторизовать профиль' для входа.")
+
     def create_messages_tab(self):
         """Вкладка для просмотра сообщений из канала/чата"""
         # Поля ввода
@@ -307,65 +317,61 @@ class ForwarderApp(ctk.CTk):
 
     async def fetch_messages(self, chat, limit, filter_type):
         """Асинхронная загрузка сообщений через Telethon (возвращает список строк)"""
-        api_id = int(self.api_id_entry.get())
-        api_hash = self.api_hash_entry.get()
 
-        # Используем общий клиент, если его нет - создаём
-        if self.client is None:
-            self.client = TelegramClient('user_session', api_id, api_hash)
-            await self.client.start()
-            self.log("Авторизация для просмотра сообщений успешна")
+        # Проверяем авторизацию
+        if not self.authorized or self.client is None:
+            return ["❌ Профиль не авторизован! Сначала авторизуйтесь в настройках.\n"]
 
         result_lines = []
         try:
             entity = await self.client.get_entity(chat)
-        except Exception as e:
-            result_lines.append(f"Не удалось найти чат: {e}\n")
-            return result_lines
+            result_lines.append(f"=== Последние {limit} сообщений из {chat} ===\n\n")
 
-        result_lines.append(f"=== Последние {limit} сообщений из {chat} ===\n\n")
+            count = 0
+            async for msg in self.client.iter_messages(entity, limit=limit):
+                msg_type = self.get_message_type_helper(msg)
+                if filter_type and filter_type not in msg_type:
+                    continue
 
-        count = 0
-        async for msg in self.client.iter_messages(entity, limit=limit):
-            msg_type = self.get_message_type_helper(msg)
-            if filter_type and filter_type not in msg_type:
-                continue
-
-            duration_str = ""
-            if msg.video_note or msg.video or msg.voice:
-                duration = None
-                if msg.video_note or msg.video:
-                    media = msg.video_note if msg.video_note else msg.video
-                    if hasattr(media, 'attributes'):
-                        for attr in media.attributes:
-                            if isinstance(attr, DocumentAttributeVideo):
+                duration_str = ""
+                if msg.video_note or msg.video or msg.voice:
+                    duration = None
+                    if msg.video_note or msg.video:
+                        media = msg.video_note if msg.video_note else msg.video
+                        if hasattr(media, 'attributes'):
+                            for attr in media.attributes:
+                                if isinstance(attr, DocumentAttributeVideo):
+                                    duration = attr.duration
+                                    break
+                    if msg.voice:
+                        for attr in msg.voice.attributes:
+                            if isinstance(attr, DocumentAttributeAudio) and attr.voice:
                                 duration = attr.duration
                                 break
-                if msg.voice:
-                    for attr in msg.voice.attributes:
-                        if isinstance(attr, DocumentAttributeAudio) and attr.voice:
-                            duration = attr.duration
-                            break
-                if duration is not None:
-                    duration_int = int(duration)
-                    minutes = duration_int // 60
-                    seconds = duration_int % 60
-                    if minutes:
-                        duration_str = f" | Длительность: {minutes}:{seconds:02d}"
+                    if duration is not None:
+                        duration_int = int(duration)
+                        minutes = duration_int // 60
+                        seconds = duration_int % 60
+                        if minutes:
+                            duration_str = f" | Длительность: {minutes}:{seconds:02d}"
+                        else:
+                            duration_str = f" | Длительность: {seconds} сек"
                     else:
-                        duration_str = f" | Длительность: {seconds} сек"
-                else:
-                    duration_str = " | Длительность: ?"
+                        duration_str = " | Длительность: ?"
 
-            raw_content = msg.text if msg.text else getattr(msg.file, 'name', None)
-            content = raw_content if raw_content is not None else '—'
-            if len(content) > 100:
-                content = content[:100] + "..."
-            line = f"ID: {msg.id} | Тип: {msg_type}{duration_str} | Содержание: {content}\n"
-            result_lines.append(line)
-            count += 1
+                raw_content = msg.text if msg.text else getattr(msg.file, 'name', None)
+                content = raw_content if raw_content is not None else '—'
+                if len(content) > 100:
+                    content = content[:100] + "..."
+                line = f"ID: {msg.id} | Тип: {msg_type}{duration_str} | Содержание: {content}\n"
+                result_lines.append(line)
+                count += 1
 
-        result_lines.append(f"\n--- Загружено {count} сообщений ---\n")
+            result_lines.append(f"\n--- Загружено {count} сообщений ---\n")
+
+        except Exception as e:
+            result_lines.append(f"Ошибка: {e}\n")
+
         return result_lines
 
     def get_message_type_helper(self, message):
@@ -493,13 +499,14 @@ class ForwarderApp(ctk.CTk):
             "api_hash": self.api_hash_entry.get(),
             "recipients_file": self.recipients_file_entry.get(),
             "groups_file": self.groups_file_entry.get(),
-            "note_source_chat": self.note_chat_entry.get(),
-            "note_auto_find": self.note_auto_var.get(),
-            "note_message_ids": self.note_ids_entry.get(),
-            "video_source_chat": self.video_chat_entry.get(),
-            "video_auto_find": self.video_auto_var.get(),
-            "video_message_ids": self.video_ids_entry.get(),
-            "video_interval": int(self.video_interval_entry.get()),
+            # Новые настройки для ЛС (2 сообщения)
+            "ls_source_chat_1": self.ls_chat_1_entry.get(),
+            "ls_auto_find_1": self.ls_auto_1_var.get(),
+            "ls_message_ids_1": self.ls_ids_1_entry.get(),
+            "ls_source_chat_2": self.ls_chat_2_entry.get(),
+            "ls_auto_find_2": self.ls_auto_2_var.get(),
+            "ls_message_ids_2": self.ls_ids_2_entry.get(),
+            "ls_message_interval": int(self.ls_interval_entry.get()),
             "delay_between_sends": int(self.delay_entry.get()),
             "group_cycle_interval": int(self.group_interval_entry.get()),
             "group_source_chat": self.group_chat_entry.get(),
@@ -564,75 +571,327 @@ class ForwarderApp(ctk.CTk):
         self.save_button = ctk.CTkButton(self.tab_settings, text="Сохранить настройки", command=self.save_config)
         self.save_button.grid(row=row, column=0, columnspan=2, padx=10, pady=20)
 
+        self.save_button = ctk.CTkButton(self.tab_settings, text="Сохранить настройки", command=self.save_config)
+        self.save_button.grid(row=row, column=0, columnspan=2, padx=10, pady=20)
+        row += 1
+
+
+        auth_frame = ctk.CTkFrame(self.tab_settings)
+        auth_frame.grid(row=row, column=0, columnspan=3, padx=10, pady=10, sticky="ew")
+        row += 1
+
+        ctk.CTkLabel(auth_frame, text="🔐 АВТОРИЗАЦИЯ", font=("Arial", 14, "bold")).grid(row=0, column=0, columnspan=3, padx=5, pady=5, sticky="w")
+
+        self.auth_button = ctk.CTkButton(
+            auth_frame, 
+            text="🔑 Авторизовать профиль", 
+            command=self.authorize_profile,
+            width=200
+        )
+        self.auth_button.grid(row=1, column=0, padx=5, pady=5)
+
+        self.profile_status_label = ctk.CTkLabel(
+            auth_frame, 
+            text="❌ Не авторизован", 
+            text_color="red",
+            font=("Arial", 12)
+        )
+        self.profile_status_label.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+
+        self.profile_info_label = ctk.CTkLabel(
+            auth_frame, 
+            text="", 
+            font=("Arial", 11),
+            text_color="gray"
+        )
+        self.profile_info_label.grid(row=2, column=0, columnspan=2, padx=5, pady=2, sticky="w")
+
+
+        # Разделительная линия
+        separator = ctk.CTkFrame(self.tab_settings, height=2, fg_color="gray")
+        separator.grid(row=row, column=0, columnspan=3, padx=10, pady=10, sticky="ew")
+        row += 1
+
+        # Кнопка удаления профиля
+        self.delete_profile_button = ctk.CTkButton(
+            self.tab_settings, 
+            text="🗑️ Удалить профиль (сброс авторизации)", 
+            command=self.delete_profile,
+            fg_color="#8B0000",  # тёмно-красный цвет
+            hover_color="#A00000",
+            width=250
+        )
+        self.delete_profile_button.grid(row=row, column=0, columnspan=2, padx=10, pady=10)
+
+        # Предупреждение
+        warning_label = ctk.CTkLabel(
+            self.tab_settings, 
+            text="⚠️ Внимание! Это удалит все сохранённые сессии Telegram.\nПосле этого потребуется повторная авторизация при следующем запуске рассылки.",
+            text_color="orange",
+            font=("Arial", 11)
+        )
+        warning_label.grid(row=row+1, column=0, columnspan=2, padx=10, pady=5)
+
+    def authorize_profile(self):
+        """Авторизация профиля Telegram"""
+
+        if not self.api_id_entry.get() or not self.api_hash_entry.get():
+            self.log("Ошибка: сначала укажите API ID и API Hash в настройках!")
+            return
+
+        # Запускаем авторизацию в отдельном потоке
+        self.auth_button.configure(state="disabled", text="⏳ Авторизация...")
+        self.log("Начинаем авторизацию профиля Telegram...")
+
+        def auth_thread():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self._do_authorize())
+            except Exception as e:
+                self.log(f"Ошибка авторизации: {e}")
+            finally:
+                loop.close()
+                self.after(0, lambda: self.auth_button.configure(state="normal", text="🔑 Авторизовать профиль"))
+
+        threading.Thread(target=auth_thread, daemon=True).start()
+
+    async def _do_authorize(self):
+        """Асинхронная авторизация профиля"""
+        api_id = int(self.api_id_entry.get())
+        api_hash = self.api_hash_entry.get()
+
+        # Создаём клиент для авторизации
+        client = TelegramClient('user_session', api_id, api_hash)
+
+        try:
+            await client.start()
+            # Получаем информацию о пользователе
+            me = await client.get_me()
+
+            self.current_user = me
+            self.authorized = True
+            self.client = client  # сохраняем авторизованный клиент
+
+            # Обновляем интерфейс с информацией о профиле
+            self.after(0, self._update_profile_display, me)
+
+            self.log(f"✅ Авторизация успешна! Вы вошли как: {me.first_name} {me.last_name or ''} (@{me.username or 'нет username'})")
+
+        except Exception as e:
+            self.authorized = False
+            self.current_user = None
+            self.client = None
+            self.log(f"❌ Ошибка авторизации: {e}")
+            self.after(0, self._update_profile_display, None)
+        finally:
+            if not self.authorized:
+                await client.disconnect()
+
+    def _update_profile_display(self, user):
+        """Обновляет отображение информации о профиле"""
+        if user:
+            name = f"{user.first_name} {user.last_name or ''}".strip()
+            username = f"@{user.username}" if user.username else "нет username"
+            self.profile_status_label.configure(text="✅ Авторизован", text_color="green")
+            self.profile_info_label.configure(text=f"{name} | {username} | ID: {user.id}")
+        else:
+            self.profile_status_label.configure(text="❌ Не авторизован", text_color="red")
+            self.profile_info_label.configure(text="")
+
+    def delete_profile(self):
+        """Удаляет файлы сессии Telegram для сброса авторизации"""
+        # Подтверждение действия
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("Подтверждение")
+        dialog.geometry("400x180")
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.focus_force()
+    
+        # Центрируем окно
+        dialog.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() - 400) // 2
+        y = self.winfo_y() + (self.winfo_height() - 180) // 2
+        dialog.geometry(f"+{x}+{y}")
+    
+        ctk.CTkLabel(dialog, text="Вы уверены, что хотите удалить профиль?", wraplength=350).pack(pady=(20, 10), padx=20)
+        ctk.CTkLabel(dialog, text="Будут удалены все сохранённые сессии Telegram.", text_color="orange", wraplength=350).pack(pady=(0, 10), padx=20)
+    
+        result = [False]
+    
+        def on_confirm():
+            result[0] = True
+            dialog.destroy()
+    
+        def on_cancel():
+            result[0] = False
+            dialog.destroy()
+    
+        button_frame = ctk.CTkFrame(dialog)
+        button_frame.pack(pady=10)
+    
+        ctk.CTkButton(button_frame, text="Да, удалить", command=on_confirm, fg_color="#8B0000", hover_color="#A00000", width=100).pack(side="left", padx=10)
+        ctk.CTkButton(button_frame, text="Отмена", command=on_cancel, width=100).pack(side="left", padx=10)
+    
+        dialog.wait_window()
+    
+        if not result[0]:
+            self.log("Удаление профиля отменено.")
+            return
+    
+        # Удаляем файлы сессии
+        session_files = [
+            "user_session.session",
+            "temp_session.session",
+            "user_session.session-journal",  # SQLite журнал
+            "temp_session.session-journal"
+        ]
+    
+        deleted_count = 0
+        for file_name in session_files:
+            file_path = Path(file_name)
+            if file_path.exists():
+                try:
+                    file_path.unlink()
+                    self.log(f"Удалён файл: {file_name}")
+                    deleted_count += 1
+                except Exception as e:
+                    self.log(f"Ошибка при удалении {file_name}: {e}")
+    
+        # Также удаляем файл сессии из папки с программой (на всякий случай)
+        session_variants = ["*.session", "*.session-journal"]
+        for pattern in session_variants:
+            for file_path in Path(".").glob(pattern):
+                if file_path.exists():
+                    try:
+                        file_path.unlink()
+                        self.log(f"Удалён файл: {file_path.name}")
+                        deleted_count += 1
+                    except Exception:
+                        pass
+    
+        # Сбрасываем статус авторизации
+        self.authorized = False
+        self.current_user = None
+        
+        # Сбрасываем клиент, если он был активен
+        if self.client:
+            try:
+                # Создаём временный loop для отключения, если клиент активен
+                loop = asyncio.new_event_loop()
+                loop.run_until_complete(self.close_client())
+                loop.close()
+            except:
+                pass
+            self.client = None
+    
+        # Обновляем интерфейс (сбрасываем отображение профиля)
+        self.after(0, self._update_profile_display, None)
+    
+        if deleted_count > 0:
+            self.log(f"✅ Профиль успешно удалён. Удалено файлов: {deleted_count}")
+            self.log("При следующем запуске рассылки потребуется повторная авторизация.")
+    
+            # Показываем информационное окно
+            info_dialog = ctk.CTkToplevel(self)
+            info_dialog.title("Готово")
+            info_dialog.geometry("350x120")
+            info_dialog.transient(self)
+            info_dialog.grab_set()
+    
+            info_dialog.update_idletasks()
+            x = self.winfo_x() + (self.winfo_width() - 350) // 2
+            y = self.winfo_y() + (self.winfo_height() - 120) // 2
+            info_dialog.geometry(f"+{x}+{y}")
+    
+            ctk.CTkLabel(info_dialog, text="✅ Профиль успешно удалён!", font=("Arial", 14)).pack(pady=(20, 10))
+            ctk.CTkLabel(info_dialog, text="При следующем запуске рассылки потребуется авторизация.").pack(pady=(0, 10))
+            ctk.CTkButton(info_dialog, text="OK", command=info_dialog.destroy, width=80).pack(pady=10)
+        else:
+            self.log("⚠️ Файлы сессии не найдены. Возможно, профиль уже был удалён.")
+
     # ---------- Вкладка личных сообщений ----------
     def create_private_tab(self):
-        # Блок "Видеокружки"
-        self.note_frame = ctk.CTkFrame(self.tab_private)
-        self.note_frame.grid(row=0, column=0, columnspan=3, padx=10, pady=10, sticky="ew")
-        ctk.CTkLabel(self.note_frame, text="Видеокружки:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.note_chat_entry = ctk.CTkEntry(self.note_frame, width=250)
-        self.note_chat_entry.grid(row=0, column=1, padx=5, pady=5)
-        self.note_chat_entry.insert(0, self.config.get("note_source_chat", "me"))
-        self.note_auto_var = ctk.BooleanVar(value=self.config.get("note_auto_find", True))
-        self.note_auto_check = ctk.CTkCheckBox(self.note_frame, text="авто-поиск последнего", variable=self.note_auto_var)
-        self.note_auto_check.grid(row=0, column=2, padx=5, pady=5)
-        ctk.CTkLabel(self.note_frame, text="ID сообщений (через запятую):").grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        self.note_ids_entry = ctk.CTkEntry(self.note_frame, width=400)
-        self.note_ids_entry.grid(row=1, column=1, columnspan=2, padx=5, pady=5, sticky="w")
-        self.note_ids_entry.insert(0, self.config.get("note_message_ids", ""))
+        """Вкладка для личных сообщений - пересылка 2 любых сообщений"""
 
-        # Блок "Видео"
-        self.video_frame = ctk.CTkFrame(self.tab_private)
-        self.video_frame.grid(row=1, column=0, columnspan=3, padx=10, pady=10, sticky="ew")
-        ctk.CTkLabel(self.video_frame, text="Видео (статичное):").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.video_chat_entry = ctk.CTkEntry(self.video_frame, width=250)
-        self.video_chat_entry.grid(row=0, column=1, padx=5, pady=5)
-        self.video_chat_entry.insert(0, self.config.get("video_source_chat", "me"))
-        self.video_auto_var = ctk.BooleanVar(value=self.config.get("video_auto_find", True))
-        self.video_auto_check = ctk.CTkCheckBox(self.video_frame, text="авто-поиск последнего", variable=self.video_auto_var)
-        self.video_auto_check.grid(row=0, column=2, padx=5, pady=5)
-        ctk.CTkLabel(self.video_frame, text="ID сообщений (через запятую):").grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        self.video_ids_entry = ctk.CTkEntry(self.video_frame, width=400)
-        self.video_ids_entry.grid(row=1, column=1, columnspan=2, padx=5, pady=5, sticky="w")
-        self.video_ids_entry.insert(0, self.config.get("video_message_ids", ""))
+        # Блок "Первое сообщение"
+        self.frame_msg1 = ctk.CTkFrame(self.tab_private)
+        self.frame_msg1.grid(row=0, column=0, columnspan=4, padx=10, pady=10, sticky="ew")
 
-        # Интервал между кружком и видео
-        ctk.CTkLabel(self.tab_private, text="Интервал до видео (сек, min=60):").grid(row=2, column=0, padx=10, pady=5, sticky="w")
-        self.video_interval_entry = ctk.CTkEntry(self.tab_private, width=100)
-        self.video_interval_entry.grid(row=2, column=1, padx=10, pady=5, sticky="w")
-        self.video_interval_entry.insert(0, str(self.config.get("video_interval", 150)))
+        ctk.CTkLabel(self.frame_msg1, text="📨 ПЕРВОЕ СООБЩЕНИЕ", font=("Arial", 14, "bold")).grid(row=0, column=0, columnspan=4, padx=5, pady=5, sticky="w")
 
-        # Интервал между получателями
+        ctk.CTkLabel(self.frame_msg1, text="Чат-источник:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        self.ls_chat_1_entry = ctk.CTkEntry(self.frame_msg1, width=300)
+        self.ls_chat_1_entry.grid(row=1, column=1, padx=5, pady=5)
+        self.ls_chat_1_entry.insert(0, self.config.get("ls_source_chat_1", ""))
+
+        self.ls_auto_1_var = ctk.BooleanVar(value=self.config.get("ls_auto_find_1", True))
+        self.ls_auto_1_check = ctk.CTkCheckBox(self.frame_msg1, text="авто-поиск последнего", variable=self.ls_auto_1_var)
+        self.ls_auto_1_check.grid(row=1, column=2, padx=5, pady=5)
+
+        ctk.CTkLabel(self.frame_msg1, text="ID сообщений (через запятую):").grid(row=2, column=0, padx=5, pady=5, sticky="w")
+        self.ls_ids_1_entry = ctk.CTkEntry(self.frame_msg1, width=400)
+        self.ls_ids_1_entry.grid(row=2, column=1, columnspan=2, padx=5, pady=5, sticky="w")
+        self.ls_ids_1_entry.insert(0, self.config.get("ls_message_ids_1", ""))
+
+        # Блок "Второе сообщение"
+        self.frame_msg2 = ctk.CTkFrame(self.tab_private)
+        self.frame_msg2.grid(row=1, column=0, columnspan=4, padx=10, pady=10, sticky="ew")
+
+        ctk.CTkLabel(self.frame_msg2, text="📨 ВТОРОЕ СООБЩЕНИЕ", font=("Arial", 14, "bold")).grid(row=0, column=0, columnspan=4, padx=5, pady=5, sticky="w")
+
+        ctk.CTkLabel(self.frame_msg2, text="Чат-источник:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        self.ls_chat_2_entry = ctk.CTkEntry(self.frame_msg2, width=300)
+        self.ls_chat_2_entry.grid(row=1, column=1, padx=5, pady=5)
+        self.ls_chat_2_entry.insert(0, self.config.get("ls_source_chat_2", ""))
+
+        self.ls_auto_2_var = ctk.BooleanVar(value=self.config.get("ls_auto_find_2", True))
+        self.ls_auto_2_check = ctk.CTkCheckBox(self.frame_msg2, text="авто-поиск последнего", variable=self.ls_auto_2_var)
+        self.ls_auto_2_check.grid(row=1, column=2, padx=5, pady=5)
+
+        ctk.CTkLabel(self.frame_msg2, text="ID сообщений (через запятую):").grid(row=2, column=0, padx=5, pady=5, sticky="w")
+        self.ls_ids_2_entry = ctk.CTkEntry(self.frame_msg2, width=400)
+        self.ls_ids_2_entry.grid(row=2, column=1, columnspan=2, padx=5, pady=5, sticky="w")
+        self.ls_ids_2_entry.insert(0, self.config.get("ls_message_ids_2", ""))
+
+        # Настройки рассылки
+        ctk.CTkLabel(self.tab_private, text="⚙️ НАСТРОЙКИ РАССЫЛКИ", font=("Arial", 14, "bold")).grid(row=2, column=0, columnspan=4, padx=10, pady=(10, 5), sticky="w")
+
         ctk.CTkLabel(self.tab_private, text="Интервал между сообщениями (сек):").grid(row=3, column=0, padx=10, pady=5, sticky="w")
+        self.ls_interval_entry = ctk.CTkEntry(self.tab_private, width=100)
+        self.ls_interval_entry.grid(row=3, column=1, padx=10, pady=5, sticky="w")
+        self.ls_interval_entry.insert(0, str(self.config.get("ls_message_interval", 150)))
+
+        ctk.CTkLabel(self.tab_private, text="Интервал между получателями (сек):").grid(row=4, column=0, padx=10, pady=5, sticky="w")
         self.delay_entry = ctk.CTkEntry(self.tab_private, width=100)
-        self.delay_entry.grid(row=3, column=1, padx=10, pady=5, sticky="w")
+        self.delay_entry.grid(row=4, column=1, padx=10, pady=5, sticky="w")
         self.delay_entry.insert(0, str(self.config.get("delay_between_sends", 360)))
 
-        # Время первого сообщения
-        ctk.CTkLabel(self.tab_private, text="Время первого сообщения (HH:MM или YYYY-MM-DD HH:MM:SS):").grid(row=4, column=0, padx=10, pady=5, sticky="w")
+        ctk.CTkLabel(self.tab_private, text="Время первого сообщения (HH:MM или YYYY-MM-DD HH:MM:SS):").grid(row=5, column=0, padx=10, pady=5, sticky="w")
         self.start_time_entry = ctk.CTkEntry(self.tab_private, width=300)
-        self.start_time_entry.grid(row=4, column=1, padx=10, pady=5)
+        self.start_time_entry.grid(row=5, column=1, padx=10, pady=5)
         self.start_time_entry.insert(0, "")
 
         # Файл получателей
-        ctk.CTkLabel(self.tab_private, text="Файл получателей:").grid(row=5, column=0, padx=10, pady=5, sticky="w")
+        ctk.CTkLabel(self.tab_private, text="Файл получателей:").grid(row=6, column=0, padx=10, pady=5, sticky="w")
         self.recipients_file_entry = ctk.CTkEntry(self.tab_private, width=300)
-        self.recipients_file_entry.grid(row=5, column=1, padx=10, pady=5)
+        self.recipients_file_entry.grid(row=6, column=1, padx=10, pady=5)
         self.recipients_file_entry.insert(0, self.config.get("recipients_file", "recipients.txt"))
         self.browse_recipients_button = ctk.CTkButton(self.tab_private, text="Обзор", command=self.browse_recipients_file)
-        self.browse_recipients_button.grid(row=5, column=2, padx=5, pady=5)
+        self.browse_recipients_button.grid(row=6, column=2, padx=5, pady=5)
         self.load_recipients_button = ctk.CTkButton(self.tab_private, text="Загрузить", command=self.load_recipients_from_file)
-        self.load_recipients_button.grid(row=5, column=3, padx=5, pady=5)
+        self.load_recipients_button.grid(row=6, column=3, padx=5, pady=5)
 
         # Редактор получателей
-        ctk.CTkLabel(self.tab_private, text="Редактировать список получателей:").grid(row=6, column=0, padx=10, pady=5, sticky="w")
+        ctk.CTkLabel(self.tab_private, text="Редактировать список получателей:").grid(row=7, column=0, padx=10, pady=5, sticky="w")
         self.recipients_text = ctk.CTkTextbox(self.tab_private, height=200, wrap="none")
-        self.recipients_text.grid(row=7, column=0, columnspan=4, padx=10, pady=5, sticky="nsew")
-        self.tab_private.grid_rowconfigure(7, weight=1)
+        self.recipients_text.grid(row=8, column=0, columnspan=4, padx=10, pady=5, sticky="nsew")
+        self.tab_private.grid_rowconfigure(8, weight=1)
         self.tab_private.grid_columnconfigure(1, weight=1)
 
         self.save_recipients_button = ctk.CTkButton(self.tab_private, text="Сохранить получателей", command=self.save_recipients)
-        self.save_recipients_button.grid(row=8, column=0, columnspan=4, padx=10, pady=5)
+        self.save_recipients_button.grid(row=9, column=0, columnspan=4, padx=10, pady=5)
 
     def load_recipients_into_text(self):
         file_path = self.recipients_file_entry.get()
@@ -1112,61 +1371,65 @@ class ForwarderApp(ctk.CTk):
             self.log(f"Ошибка отправки на {to}: {e}")
             return False
 
-    # ---------- Режим личных сообщений ----------
     async def run_private_mode(self, api_id, api_hash, tz_offset):
+        """Режим ЛС - пересылка 2 любых сообщений"""
+
+        # Проверяем авторизацию
+        if not self.authorized or self.client is None:
+            self.log("❌ Профиль не авторизован! Сначала авторизуйтесь в настройках.")
+            return
+
         recipients_file = self.recipients_file_entry.get()
         recipients = self.load_recipients(recipients_file)
         if not recipients:
             self.log("Нет получателей для рассылки ЛС.")
             return
 
-        # Используем self.client, а не локальную переменную client
-        if self.client is None:
-            self.client = TelegramClient('user_session', api_id, api_hash)
-            await self.client.start()
-            self.log("Авторизация успешна.")
-        else:
-            # Проверяем, что клиент всё ещё подключён
-            try:
-                await self.client.get_me()
-            except:
-                await self.client.start()
+        # Проверяем, что клиент всё ещё жив
+        try:
+            await self.client.get_me()
+        except:
+            self.log("⚠️ Сессия устарела. Пожалуйста, авторизуйтесь заново.")
+            self.authorized = False
+            self.current_user = None
+            self.after(0, self._update_profile_display, None)
+            return
 
         try:
-            note_messages = await self.get_source_messages(
-                self.client,  # ← исправлено: self.client
-                self.note_chat_entry.get(),
-                self.note_auto_var.get(),
-                self.note_ids_entry.get()
+            # Получаем сообщения для первого и второго слота
+            messages_1 = await self.get_source_messages(
+                self.client,
+                self.ls_chat_1_entry.get(),
+                self.ls_auto_1_var.get(),
+                self.ls_ids_1_entry.get()
             )
-            if not note_messages:
-                self.log("Не удалось получить ни одного видеокружка. Отмена.")
+            if not messages_1:
+                self.log("Не удалось получить ни одного сообщения для первого слота. Отмена.")
                 return
 
-            video_messages = await self.get_source_messages(
-                self.client,  # ← исправлено: self.client
-                self.video_chat_entry.get(),
-                self.video_auto_var.get(),
-                self.video_ids_entry.get()
+            messages_2 = await self.get_source_messages(
+                self.client,
+                self.ls_chat_2_entry.get(),
+                self.ls_auto_2_var.get(),
+                self.ls_ids_2_entry.get()
             )
-            video_interval = int(self.video_interval_entry.get())
-            if not video_messages:
-                self.log("Видео не найдены, отправка только кружков.")
-                video_interval = 0
+            if not messages_2:
+                self.log("Не удалось получить ни одного сообщения для второго слота. Отмена.")
+                return
 
+            msg_interval = int(self.ls_interval_entry.get())
             delay = int(self.delay_entry.get())
             first_time = self.parse_start_time(self.start_time_entry.get())
 
-            await self.schedule_forward_to_recipients(
-                self.client, recipients,  # ← исправлено: self.client
-                note_messages, video_messages,
-                delay, first_time, tz_offset, video_interval
+            await self.schedule_two_messages(
+                self.client, recipients,
+                messages_1, messages_2,
+                delay, msg_interval, first_time, tz_offset
             )
         except errors.rpcerrorlist.ApiIdInvalidError:
             self.log("Неверный API_ID или API_HASH.")
         except Exception as e:
             self.log(f"Ошибка в режиме ЛС: {e}")
-        # НЕ отключаем клиент здесь!
 
     def load_recipients(self, file_path):
         if not Path(file_path).exists():
@@ -1174,7 +1437,90 @@ class ForwarderApp(ctk.CTk):
             return []
         with open(file_path, 'r', encoding='utf-8') as f:
             return [line.strip() for line in f if line.strip()]
+    async def schedule_two_messages(self, client, recipients, msgs_1, msgs_2, delay, msg_interval, first_time, tz_offset):
+        """Планирует пересылку двух сообщений для каждого получателя"""
+        success_1 = 0
+        fail_1 = 0
+        success_2 = 0
+        fail_2 = 0
+        total = len(recipients)
 
+        now = datetime.now()
+        if first_time and first_time > now:
+            first_schedule = first_time
+        else:
+            first_schedule = now + timedelta(seconds=delay)
+
+        for i, recipient in enumerate(recipients, start=1):
+            # Время для первого сообщения
+            time_1 = first_schedule + timedelta(seconds=(i-1)*delay)
+            time_1_utc = time_1 - timedelta(hours=tz_offset)
+            display_time_1 = time_1
+
+            # Время для второго сообщения
+            time_2 = time_1 + timedelta(seconds=msg_interval)
+            time_2_utc = time_2 - timedelta(hours=tz_offset)
+            display_time_2 = time_2
+
+            self.log(f"[{i}/{total}] Планирование для {recipient}:")
+            self.log(f"  Сообщение 1 на {display_time_1.strftime('%Y-%m-%d %H:%M:%S')}")
+            self.log(f"  Сообщение 2 на {display_time_2.strftime('%Y-%m-%d %H:%M:%S')}")
+
+            # Первое сообщение (случайное из списка)
+            msg_1 = random.choice(msgs_1)
+            if msg_1:
+                try:
+                    entity = await client.get_entity(recipient)
+                    await client.forward_messages(
+                        entity, msg_1,
+                        drop_author=True,
+                        schedule=time_1_utc
+                    )
+                    success_1 += 1
+                except errors.FloodWaitError as e:
+                    self.log(f"Flood wait для {recipient}: ждём {e.seconds} сек")
+                    await asyncio.sleep(e.seconds)
+                    try:
+                        entity = await client.get_entity(recipient)
+                        await client.forward_messages(entity, msg_1, drop_author=True, schedule=time_1_utc)
+                        success_1 += 1
+                    except Exception as e2:
+                        self.log(f"Ошибка при отправке первого сообщения {recipient}: {e2}")
+                        fail_1 += 1
+                except Exception as e:
+                    self.log(f"Ошибка планирования первого сообщения {recipient}: {e}")
+                    fail_1 += 1
+            else:
+                fail_1 += 1
+
+            # Второе сообщение (случайное из списка)
+            msg_2 = random.choice(msgs_2)
+            if msg_2:
+                try:
+                    entity = await client.get_entity(recipient)
+                    await client.forward_messages(
+                        entity, msg_2,
+                        drop_author=True,
+                        schedule=time_2_utc
+                    )
+                    success_2 += 1
+                except errors.FloodWaitError as e:
+                    self.log(f"Flood wait для {recipient}: ждем {e.seconds} сек")
+                    await asyncio.sleep(e.seconds)
+                    try:
+                        entity = await client.get_entity(recipient)
+                        await client.forward_messages(entity, msg_2, drop_author=True, schedule=time_2_utc)
+                        success_2 += 1
+                    except Exception as e2:
+                        self.log(f"Ошибка при отправке второго сообщения {recipient}: {e2}")
+                        fail_2 += 1
+                except Exception as e:
+                    self.log(f"Ошибка планирования второго сообщения {recipient}: {e}")
+                    fail_2 += 1
+            else:
+                fail_2 += 1
+
+        self.log(f"Планирование завершено. Сообщение 1: успешно {success_1}, ошибок {fail_1}. Сообщение 2: успешно {success_2}, ошибок {fail_2}")
     async def get_source_messages(self, client, chat, auto_find, ids_str):
         try:
             entity = await client.get_entity(chat)
@@ -1300,10 +1646,13 @@ class ForwarderApp(ctk.CTk):
 
     # ---------- Режим групп ----------
     async def run_groups_mode(self, api_id, api_hash, tz_offset):
-        """
-        Режим групп: бесконечно пересылает случайное сообщение из указанного чата
-        во все группы через заданный интервал.
-        """
+        """Режим групп: бесконечно пересылает случайное сообщение из указанного чата во все группы"""
+
+        # Проверяем авторизацию
+        if not self.authorized or self.client is None:
+            self.log("❌ Профиль не авторизован! Сначала авторизуйтесь в настройках.")
+            return
+
         groups_file = self.groups_file_entry.get()
         groups = self.load_groups(groups_file)
         if not groups:
@@ -1315,11 +1664,17 @@ class ForwarderApp(ctk.CTk):
             self.log("Интервал между циклами должен быть больше 0.")
             return
 
-        self.client = TelegramClient('user_session', api_id, api_hash)
+        # Проверяем, что клиент всё ещё жив
         try:
-            await self.client.start()
-            self.log("Авторизация успешна.")
+            await self.client.get_me()
+        except:
+            self.log("⚠️ Сессия устарела. Пожалуйста, авторизуйтесь заново.")
+            self.authorized = False
+            self.current_user = None
+            self.after(0, self._update_profile_display, None)
+            return
 
+        try:
             source_chat = self.group_chat_entry.get()
             auto_find = self.group_auto_var.get()
             ids_str = self.group_ids_entry.get()
@@ -1349,11 +1704,6 @@ class ForwarderApp(ctk.CTk):
             self.log("Неверный API_ID или API_HASH.")
         except Exception as e:
             self.log(f"Ошибка в режиме групп: {e}")
-        finally:
-            if self.client:
-                await self.client.disconnect()
-                self.client = None
-            self.log("Сессия закрыта.")
 
     def load_groups(self, file_path):
         if not Path(file_path).exists():
@@ -1431,7 +1781,10 @@ class ForwarderApp(ctk.CTk):
 
     async def close_client(self):
         if self.client:
-            await self.client.disconnect()
+            try:
+                await self.client.disconnect()
+            except:
+                pass
             self.client = None
 
     def on_closing(self):
