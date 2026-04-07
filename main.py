@@ -446,8 +446,8 @@ class ForwarderApp(ctk.CTk):
         self.tab_messages.grid_columnconfigure(1, weight=1)
 
     def create_check_scheduled_tab(self):
-        """Вкладка для проверки отложенных сообщений"""
-        self.tab_check = self.tabview.add("Проверка отложенных")
+        """Вкладка для проверки пустых чатов"""
+        self.tab_check = self.tabview.add("Проверка чатов")
 
         # === Верхняя панель с настройками ===
         top_frame = ctk.CTkFrame(self.tab_check)
@@ -465,67 +465,33 @@ class ForwarderApp(ctk.CTk):
         self.load_check_list_button = ctk.CTkButton(top_frame, text="Загрузить список", command=self.load_check_list)
         self.load_check_list_button.grid(row=0, column=3, padx=5, pady=5)
 
-        # Режим проверки
-        ctk.CTkLabel(top_frame, text="Режим проверки:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        self.check_mode_var = ctk.StringVar(value="Все чаты")
-        self.check_mode_menu = ctk.CTkOptionMenu(
-            top_frame, 
-            values=["Все чаты", "Только из списка"],
-            variable=self.check_mode_var
-        )
-        self.check_mode_menu.grid(row=1, column=1, padx=5, pady=5, sticky="w")
-
-        # Фильтр по статусу
-        ctk.CTkLabel(top_frame, text="Фильтр:").grid(row=2, column=0, padx=5, pady=5, sticky="w")
-        self.filter_var = ctk.StringVar(value="Все")
-        self.filter_menu = ctk.CTkOptionMenu(
-            top_frame,
-            values=["Все", "С отложенными сообщениями", "Проблемные чаты"],
-            variable=self.filter_var
-        )
-        self.filter_menu.grid(row=2, column=1, padx=5, pady=5, sticky="w")
-
         # Кнопки действий
         button_frame = ctk.CTkFrame(top_frame)
-        button_frame.grid(row=3, column=0, columnspan=4, pady=10)
+        button_frame.grid(row=1, column=0, columnspan=4, pady=10)
 
-        self.check_button = ctk.CTkButton(button_frame, text="🔍 Проверить", command=self.start_check_scheduled, width=120)
+        self.check_button = ctk.CTkButton(button_frame, text="🔍 Найти пустые чаты", command=self.start_check_scheduled, width=200)
         self.check_button.pack(side="left", padx=5)
-
-        self.clear_scheduled_button = ctk.CTkButton(button_frame, text="🗑️ Очистить отложенные", command=self.clear_scheduled_messages, width=150, fg_color="#8B0000")
-        self.clear_scheduled_button.pack(side="left", padx=5)
-
-        self.reschedule_button = ctk.CTkButton(button_frame, text="🔄 Перепланировать", command=self.reschedule_stuck_messages, width=150)
-        self.reschedule_button.pack(side="left", padx=5)
 
         self.export_button = ctk.CTkButton(button_frame, text="📄 Экспорт отчёта", command=self.export_check_report, width=120)
         self.export_button.pack(side="left", padx=5)
 
         # === Редактор списка для проверки ===
         ctk.CTkLabel(self.tab_check, text="Редактировать список для проверки (по одному на строку):").pack(anchor="w", padx=10, pady=(0, 5))
-        self.check_list_text = ctk.CTkTextbox(self.tab_check, height=120, wrap="none")
+        self.check_list_text = ctk.CTkTextbox(self.tab_check, height=150, wrap="none")
         self.check_list_text.pack(fill="x", padx=10, pady=(0, 10))
         self.save_check_list_button = ctk.CTkButton(self.tab_check, text="Сохранить список", command=self.save_check_list)
         self.save_check_list_button.pack(anchor="w", padx=10, pady=(0, 10))
 
-        # === Таблица результатов ===
+        # === Результаты проверки ===
         ctk.CTkLabel(self.tab_check, text="📊 Результаты проверки:").pack(anchor="w", padx=10, pady=(0, 5))
 
         # Создаём frame для таблицы с прокруткой
         table_frame = ctk.CTkFrame(self.tab_check)
         table_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
-        # Заголовки таблицы
-        headers = ["Чат", "ID", "Отложенных", "Статус", "Действие"]
-        for col, header in enumerate(headers):
-            label = ctk.CTkLabel(table_frame, text=header, font=("Arial", 12, "bold"), width=150)
-            label.grid(row=0, column=col, padx=2, pady=2, sticky="ew")
-
         # Текстовое поле для вывода результатов
         self.check_results_text = ctk.CTkTextbox(table_frame, wrap="none", font=("Courier", 11))
-        self.check_results_text.grid(row=1, column=0, columnspan=5, padx=2, pady=2, sticky="nsew")
-        table_frame.grid_rowconfigure(1, weight=1)
-        table_frame.grid_columnconfigure(0, weight=1)
+        self.check_results_text.pack(fill="both", expand=True, padx=2, pady=2)
 
         # Статусная строка
         self.check_status_label = ctk.CTkLabel(self.tab_check, text="Готов к проверке", font=("Arial", 11))
@@ -559,14 +525,14 @@ class ForwarderApp(ctk.CTk):
         self.log(f"Список для проверки сохранён в {file_path}")
 
     def start_check_scheduled(self):
-        """Запускает проверку отложенных сообщений"""
+        """Запускает проверку пустых чатов"""
         if not self.authorized or self.client is None:
             self.log("❌ Профиль не авторизован! Сначала авторизуйтесь в настройках.")
             return
 
         self.check_button.configure(state="disabled", text="⏳ Проверка...")
         self.check_results_text.delete("1.0", "end")
-        self.check_results_text.insert("end", "Загрузка диалогов...\n")
+        self.check_results_text.insert("end", "Загрузка...\n")
 
         thread = threading.Thread(target=self.run_check_scheduled_full, daemon=True)
         thread.start()
@@ -586,15 +552,17 @@ class ForwarderApp(ctk.CTk):
     from telethon.tl.functions.messages import GetScheduledHistoryRequest
 
     async def async_check_scheduled_full(self):
-        """Полная асинхронная проверка отложенных сообщений"""
-        mode = self.check_mode_var.get()
-        filter_type = self.filter_var.get()
+        """Проверка списка пользователей - выводит только пустые чаты"""
 
         # Получаем список для проверки
-        check_list = []
-        if mode == "Только из списка":
-            check_list_text = self.check_list_text.get("1.0", "end-1c")
-            check_list = [line.strip() for line in check_list_text.split('\n') if line.strip()]
+        check_list_text = self.check_list_text.get("1.0", "end-1c")
+        check_list = [line.strip() for line in check_list_text.split('\n') if line.strip()]
+
+        if not check_list:
+            self.after(0, lambda: self.check_results_text.insert("end", "❌ Список пуст! Загрузите или введите данные для проверки.\n"))
+            return
+
+        self.log(f"📋 Загружено {len(check_list)} записей для проверки: {check_list}")
 
         self.after(0, lambda: self.check_results_text.delete("1.0", "end"))
 
@@ -603,67 +571,82 @@ class ForwarderApp(ctk.CTk):
         api_hash = self.api_hash_entry.get()
         client = TelegramClient('temp_session', api_id, api_hash)
 
-        results = []
-        total_scheduled = 0
-        problematic = 0
+        empty_usernames = []  # Список username с пустыми чатами
+        not_found = []        # Не найденные пользователи
 
         try:
             await client.start()
-            self.after(0, lambda: self.check_results_text.insert("end", "Анализ диалогов...\n"))
+            self.after(0, lambda: self.check_results_text.insert("end", "🔍 Поиск пустых чатов...\n\n"))
 
-            async for dialog in client.iter_dialogs():
-                # Фильтруем по списку, если нужно
-                if mode == "Только из списка" and dialog.name not in check_list and str(dialog.id) not in check_list:
-                    continue
+            for check_item in check_list:
+                check_item_clean = check_item.replace('@', '').replace('https://t.me/', '').replace('t.me/', '').strip()
 
-                # ✅ ПРАВИЛЬНЫЙ СПОСОБ: используем GetScheduledHistoryRequest
-                scheduled_count = 0
                 try:
-                    # Получаем input entity для запроса
-                    input_entity = await client.get_input_entity(dialog.entity)
-                    result = await client(GetScheduledHistoryRequest(
-                        peer=input_entity,
-                        hash=0
-                    ))
-                    scheduled_count = len(result.messages) if result.messages else 0
+                    # Пытаемся получить пользователя
+                    entity = await client.get_entity(check_item_clean)
+
+                    # Проверяем, есть ли сообщения в чате
+                    messages = []
+                    async for msg in client.iter_messages(entity, limit=1):
+                        messages.append(msg)
+
+                    has_messages = len(messages) > 0
+
+                    # Если чат пустой (нет сообщений)
+                    if not has_messages:
+                        username = getattr(entity, 'username', None)
+                        if username:
+                            empty_usernames.append(f"@{username}")
+                        else:
+                            # Если нет username, выводим имя
+                            first_name = getattr(entity, 'first_name', '')
+                            last_name = getattr(entity, 'last_name', '')
+                            name = f"{first_name} {last_name}".strip()
+                            empty_usernames.append(name if name else str(entity.id))
+
+                        self.log(f"📭 Пустой чат: {check_item}")
+                    else:
+                        self.log(f"✅ Есть сообщения: {check_item}")
+
+                except errors.UserIsBlockedError:
+                    # Заблокированный пользователь тоже считается "пустым" для наших целей
+                    empty_usernames.append(f"{check_item} (заблокирован)")
+                    self.log(f"🚫 Пользователь заблокировал бота: {check_item}")
+                except errors.UsernameNotOccupiedError:
+                    not_found.append(check_item)
+                    self.log(f"❌ Пользователь не найден: {check_item}")
                 except Exception as e:
-                    # Игнорируем ошибки для чатов, где нет прав
-                    if "CHAT_ADMIN_REQUIRED" not in str(e) and "not enough rights" not in str(e):
-                        self.log(f"Ошибка получения отложенных для {dialog.name}: {e}")
-                    scheduled_count = 0
-
-                total_scheduled += scheduled_count
-                status = "✅ Нормально" if scheduled_count == 0 else "⏳ Есть отложенные"
-
-                if scheduled_count > 0:
-                    problematic += 1
-
-                # Применяем фильтр
-                if filter_type == "С отложенными сообщениями" and scheduled_count == 0:
-                    continue
-                if filter_type == "Проблемные чаты" and scheduled_count == 0:
-                    continue
-
-                # Формируем строку результата
-                result_line = f"{dialog.name} | {dialog.id} | {scheduled_count} | {status}\n"
-                results.append(result_line)
+                    error_msg = str(e)
+                    if "FLOOD" in error_msg:
+                        self.log(f"⚠️ Flood wait для {check_item}")
+                    else:
+                        not_found.append(f"{check_item} (ошибка: {error_msg[:50]})")
+                        self.log(f"⚠️ Ошибка при проверке {check_item}: {error_msg[:100]}")
 
             # Выводим результаты
             self.after(0, lambda: self.check_results_text.delete("1.0", "end"))
 
-            if results:
-                header = f"{'Чат':<30} | {'ID':<15} | {'Отложенных':<10} | Статус\n"
-                separator = "-" * 80 + "\n"
-                self.after(0, lambda: self.check_results_text.insert("end", header))
-                self.after(0, lambda: self.check_results_text.insert("end", separator))
+            result_text = ""
 
-                for line in results:
-                    self.after(0, lambda l=line: self.check_results_text.insert("end", l))
+            if empty_usernames:
+                result_text += "📋 СПИСОК ПОЛЬЗОВАТЕЛЕЙ С ПУСТЫМИ ЧАТАМИ:\n"
+                result_text += "=" * 50 + "\n"
+                for username in empty_usernames:
+                    result_text += f"{username}\n"
+                result_text += f"\n📊 Всего найдено: {len(empty_usernames)} пользователей с пустыми чатами\n"
             else:
-                self.after(0, lambda: self.check_results_text.insert("end", "Нет чатов, соответствующих критериям\n"))
+                result_text += "✅ Пустых чатов не найдено!\n"
+
+            if not_found:
+                result_text += f"\n⚠️ Не найдено пользователей:\n"
+                result_text += "=" * 50 + "\n"
+                for item in not_found:
+                    result_text += f"  • {item}\n"
+
+            self.after(0, lambda: self.check_results_text.insert("end", result_text))
 
             # Обновляем статус
-            status_text = f"📊 Проверка завершена. Всего отложенных: {total_scheduled}, Проблемных чатов: {problematic}"
+            status_text = f"📊 Проверка завершена. Пустых чатов: {len(empty_usernames)}, Не найдено: {len(not_found)}"
             self.after(0, lambda: self.check_status_label.configure(text=status_text))
             self.log(status_text)
 
@@ -1034,22 +1017,30 @@ class ForwarderApp(ctk.CTk):
 
     async def fetch_messages(self, chat, limit, filter_type):
         """Асинхронная загрузка сообщений через Telethon (возвращает список строк)"""
-
-        # Проверяем авторизацию
-        if not self.authorized or self.client is None:
+    
+        # Проверяем авторизацию (наличие файла сессии)
+        if not Path("user_session.session").exists():
             return ["❌ Профиль не авторизован! Сначала авторизуйтесь в настройках.\n"]
-
+    
+        api_id = int(self.api_id_entry.get())
+        api_hash = self.api_hash_entry.get()
+        
+        # ✅ СОЗДАЁМ НОВОГО КЛИЕНТА
+        client = TelegramClient('temp_session', api_id, api_hash)
+    
         result_lines = []
         try:
-            entity = await self.client.get_entity(chat)
+            await client.start()
+            
+            entity = await client.get_entity(chat)
             result_lines.append(f"=== Последние {limit} сообщений из {chat} ===\n\n")
-
+    
             count = 0
-            async for msg in self.client.iter_messages(entity, limit=limit):
+            async for msg in client.iter_messages(entity, limit=limit):
                 msg_type = self.get_message_type_helper(msg)
                 if filter_type and filter_type not in msg_type:
                     continue
-
+    
                 duration_str = ""
                 if msg.video_note or msg.video or msg.voice:
                     duration = None
@@ -1075,7 +1066,7 @@ class ForwarderApp(ctk.CTk):
                             duration_str = f" | Длительность: {seconds} сек"
                     else:
                         duration_str = " | Длительность: ?"
-
+    
                 raw_content = msg.text if msg.text else getattr(msg.file, 'name', None)
                 content = raw_content if raw_content is not None else '—'
                 if len(content) > 100:
@@ -1083,12 +1074,14 @@ class ForwarderApp(ctk.CTk):
                 line = f"ID: {msg.id} | Тип: {msg_type}{duration_str} | Содержание: {content}\n"
                 result_lines.append(line)
                 count += 1
-
+    
             result_lines.append(f"\n--- Загружено {count} сообщений ---\n")
-
+    
         except Exception as e:
             result_lines.append(f"Ошибка: {e}\n")
-
+        finally:
+            await client.disconnect()
+    
         return result_lines
 
     def get_message_type_helper(self, message):
@@ -1605,6 +1598,84 @@ class ForwarderApp(ctk.CTk):
         self.save_recipients_button = ctk.CTkButton(self.tab_private, text="Сохранить получателей", command=self.save_recipients)
         self.save_recipients_button.grid(row=9, column=0, columnspan=4, padx=10, pady=5)
 
+        # Проверка статуса аккаунта
+        self.check_status_var = ctk.BooleanVar(value=False)
+        self.check_status_check = ctk.CTkCheckBox(
+            self.tab_private, 
+            text="🔍 Проверить статус аккаунта перед рассылкой (через @SpamBot)",
+            variable=self.check_status_var
+        )
+        self.check_status_check.grid(row=11, column=0, columnspan=4, padx=10, pady=5, sticky="w")
+
+        self.status_button = ctk.CTkButton(
+            self.tab_private, 
+            text="📊 Проверить статус сейчас",
+            command=self.check_account_status,
+            width=200
+        )
+        self.status_button.grid(row=12, column=0, columnspan=4, padx=10, pady=5, sticky="w")
+
+    def check_account_status(self):
+        """Проверяет статус аккаунта через @SpamBot"""
+        if not self.authorized:
+            self.log("❌ Профиль не авторизован! Сначала авторизуйтесь.")
+            return
+
+        self.log("🔍 Проверка статуса аккаунта через @SpamBot...")
+        thread = threading.Thread(target=self.run_status_check, daemon=True)
+        thread.start()
+
+    def run_status_check(self):
+        """Запускает асинхронную проверку статуса"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self.async_check_account_status())
+        except Exception as e:
+            self.log(f"Ошибка проверки статуса: {e}")
+        finally:
+            loop.close()
+
+    async def async_check_account_status(self):
+        """Асинхронная проверка статуса аккаунта через @SpamBot"""
+        api_id = int(self.api_id_entry.get())
+        api_hash = self.api_hash_entry.get()
+        client = TelegramClient('user_session', api_id, api_hash)
+
+        try:
+            await client.start()
+
+            # Получаем @SpamBot
+            spam_bot = await client.get_entity('@SpamBot')
+
+            # Отправляем /start
+            await client.send_message(spam_bot, '/start')
+
+            # Ждём ответа
+            await asyncio.sleep(2)
+
+            # Читаем последние сообщения
+            has_restrictions = False
+            async for msg in client.iter_messages(spam_bot, limit=5):
+                text = msg.text.lower() if msg.text else ""
+
+                if "не имеет ограничений" in text or "no restrictions" in text:
+                    self.log("✅ Аккаунт в хорошем состоянии, ограничений нет!")
+                elif "ограничения" in text or "restrictions" in text:
+                    self.log("⚠️ ВНИМАНИЕ! Аккаунт имеет ограничения!")
+                    has_restrictions = True
+                    self.log(f"   Сообщение: {msg.text[:200]}")
+                elif "жалобы" in text or "complaints" in text:
+                    self.log("⚠️ На аккаунт поступали жалобы!")
+
+            if not has_restrictions:
+                self.log("✅ Статус аккаунта: нормальный")
+
+        except Exception as e:
+            self.log(f"❌ Ошибка при проверке: {e}")
+        finally:
+            await client.disconnect()
+
     def load_recipients_into_text(self):
         file_path = self.recipients_file_entry.get()
         if Path(file_path).exists():
@@ -2098,6 +2169,32 @@ class ForwarderApp(ctk.CTk):
 
         # СОЗДАЁМ НОВОГО КЛИЕНТА (используем сохранённую сессию)
         client = TelegramClient('user_session', api_id, api_hash)
+
+        # Проверка статуса аккаунта перед рассылкой
+        if self.check_status_var.get():
+            self.log("🔍 Проверка статуса аккаунта перед рассылкой...")
+            client_temp = TelegramClient('user_session', api_id, api_hash)
+            try:
+                await client_temp.start()
+                spam_bot = await client_temp.get_entity('@SpamBot')
+                await client_temp.send_message(spam_bot, '/start')
+                await asyncio.sleep(2)
+
+                has_restrictions = False
+                async for msg in client_temp.iter_messages(spam_bot, limit=3):
+                    if "ограничения" in (msg.text or "").lower():
+                        has_restrictions = True
+                        break
+
+                if has_restrictions:
+                    self.log("❌ Обнаружены ограничения на аккаунте! Рассылка отменена.")
+                    return
+                else:
+                    self.log("✅ Статус аккаунта нормальный, продолжаем...")
+            except Exception as e:
+                self.log(f"⚠️ Не удалось проверить статус: {e}")
+            finally:
+                await client_temp.disconnect()
 
         try:
             await client.start()
